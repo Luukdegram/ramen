@@ -1,6 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
 
+const port: u16 = 6881;
+
 const Info = struct {
     pieces: []const u8,
     pieceLen: usize,
@@ -36,7 +38,7 @@ const TorrentFile = struct {
     name: []const u8,
 
     /// Generates the URL to retreive tracker information
-    pub fn trackerURL(self: @This(), allocator: *std.mem.Allocator, peer: []const u8, port: u32) ![]const u8 {
+    pub fn trackerURL(self: @This(), allocator: *std.mem.Allocator, peer: []const u8, port: u16) ![]const u8 {
         // build our query paramaters
         const portS = try intToSlice(allocator, port);
         defer allocator.free(portS);
@@ -54,6 +56,22 @@ const TorrentFile = struct {
         };
 
         return try encodeUrl(allocator, self.announce, queries[0..]);
+    }
+
+    fn download(self: @This(), allocator: *std.mem.Allocator, path: []const u8) !void {
+        var peerID: [20]u8 = undefined;
+        const appName = "RAMEN";
+        std.mem.copy(peerID[0..], appName);
+        try std.crypto.randomBytes(peerID[appName.len..]);
+
+        const peers = try getPeers(allocator, peersID, port);
+    }
+
+    fn getPeers(self: @This(), allocator: *std.mem.Allocator, peerID: [20]u8, port: u16) ![]Peer {
+        const url = try self.trackerURL(allocator, peerID, port);
+
+        var socket = try std.net.tcpConnectToHost(allocator, url, 80);
+        defer socket.close();
     }
 };
 
@@ -131,7 +149,6 @@ test "generating tracker URL" {
         .pieceLen = 1,
         .name = "test",
     };
-
     const url = try tf.trackerURL(testing.allocator, "1234", 80);
     defer testing.allocator.free(url);
     std.debug.assert(std.mem.eql(u8, "example.com?info_hash=12345678901234567890&peer_id=1234&port=80&uploaded=0&downloaded=0&compact=1&left=120", url));
