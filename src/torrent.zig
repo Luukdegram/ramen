@@ -1,7 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
+const http = @import("net/http.zig");
 
-const port: u16 = 6881;
+const local_port: u16 = 6881;
 
 const Info = struct {
     pieces: []const u8,
@@ -64,14 +65,13 @@ const TorrentFile = struct {
         std.mem.copy(peerID[0..], appName);
         try std.crypto.randomBytes(peerID[appName.len..]);
 
-        const peers = try getPeers(allocator, peersID, port);
+        const peers = try getPeers(allocator, peersID, local_port);
     }
 
     fn getPeers(self: @This(), allocator: *std.mem.Allocator, peerID: [20]u8, port: u16) ![]Peer {
         const url = try self.trackerURL(allocator, peerID, port);
 
-        var socket = try std.net.tcpConnectToHost(allocator, url, 80);
-        defer socket.close();
+        const resp = try http.get(allocator, url);
     }
 };
 

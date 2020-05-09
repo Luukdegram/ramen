@@ -6,7 +6,10 @@ const Peer = struct {
     address: std.net.Address,
 };
 
-fn unmarshal(allocator, *std.mem.Allocator, bytes: []u8) MarshalError![]Peer {
+/// Parses the provided bytes into an array of Peers
+/// Returns `MarshalError.Malformed` if the length of bytes can not be divided by 6.
+/// 4 bytes for ip, 2 for the port as we currently only support ipv4.
+pub fn unmarshal(allocator, *std.mem.Allocator, bytes: []u8) MarshalError![]Peer {
     const peerSize = 6;
     const numPeers = bytes.len / peersize;
     if (bytes.len % peerSize != 0) return .Malformed;
