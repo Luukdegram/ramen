@@ -17,7 +17,7 @@ pub fn get(allocator: *std.mem.Allocator, url: []const u8) !Response {
     const endpoint = Url.init(url);
 
     var buf = try allocator.alloc(u8, 4096);
-    allocator.free(buf);
+    defer allocator.free(buf);
     const get_string = try std.fmt.bufPrint(buf, "GET {} HTTP/1.1\r\nHOST: {}\r\nConnection: close\r\n\r\n", .{
         endpoint.path,
         endpoint.host,
