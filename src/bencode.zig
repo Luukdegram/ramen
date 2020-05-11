@@ -3,6 +3,10 @@ const testing = std.testing;
 
 const ParserError = error{BadStringLength};
 
+/// Bencode allows for parsing Bencode data
+/// It is up to the implementation to use nullable fields or not.
+/// Currently this does not check if a field is mandatory or not.
+/// Also, lists are currently not supported.
 const Bencode = struct {
     const Self = @This();
 
@@ -15,14 +19,19 @@ const Bencode = struct {
     }
 
     /// unmarshal tries to parse the given bencode bytes into Type T.
-    pub fn unmarshal(self: *Self, bytes: []const u8, comptime T: type) !T {
+    pub fn unmarshal(self: *Self, comptime T: type, bytes: []const u8) !T {
         self.cursor = 0; // reset cursor
         self.buffer = bytes;
-        var value: T = undefined;
+        var decoded: T = undefined;
+        try self.parse(T, &decoded);
+        return decoded;
+    }
+
+    fn parse(self: *Self, comptime T: type, value: *T) !void {
         var builder = Builder(T).init(value);
 
         // parse the bytes
-        for (bytes) |c, i| {
+        for (self.buffer) |c, i| {
             if (i < self.cursor) {
                 // current byte is behind cursor, which means we already parsed it
                 // skip to the next byte
@@ -39,6 +48,7 @@ const Bencode = struct {
                 // directory -> new struct
                 'd' => {
                     if (builder.map()) {
+                        self.cursor += 1;
 
                         // save current field in a buffer so we can modify if required
                         // i.e. the field contains spaces so we want to replace it with an underscore.
@@ -49,17 +59,20 @@ const Bencode = struct {
                             buffer[index] = '_';
                         }
 
-                        // loop through fields so we can get the correct fieldname
-                        inline for (std.meta.fields(T)) |field| {
-                            std.debug.warn("\nField: {}", .{field.name});
-                            // if field is current field, set it.
-                            if (std.mem.eql(u8, field.name, buffer)) {
-                                var ben = Bencode.init(self.allocator);
-                                var result = ben.unmarshal(
-                                    self.buffer[self.cursor..],
-                                    @TypeOf(@field(builder.val, field.name)),
-                                );
-                            }
+                        switch (@typeInfo(T)) {
+                            .Struct => |struct_info| {
+                                inline for (struct_info.fields) |field| {
+                                    // if field is current field, set it.
+                                    if (std.mem.eql(u8, field.name, buffer)) {
+                                        var child: field.field_type = undefined;
+                                        try self.parse(field.field_type, &child);
+                                        try builder.set(child, self.allocator);
+                                    }
+                                }
+                            },
+                            else => {
+                                return error.NotImplemented;
+                            },
                         }
                     }
 
@@ -76,16 +89,21 @@ const Bencode = struct {
                 },
                 // array
                 'l' => {},
-                'e' => return builder.val,
+                'e' => {
+                    value.* = builder.val.*;
+                    return;
+                },
                 else => {
                     return error.UnknownCharacter;
                 },
             }
         }
-
-        return builder.val;
+        value.* = builder.val.*;
+        return;
     }
 
+    // decodes a slice into a string based on the length provided in the slice
+    // noted by xx: where xx is the length
     fn decodeString(self: *Self) ![]const u8 {
         const length: u64 = try self.decodeInt();
         const str = self.buffer[self.cursor .. self.cursor + length];
@@ -93,6 +111,7 @@ const Bencode = struct {
         return str;
     }
 
+    // decodes the next integer found before the color (:) symbol
     fn decodeInt(self: *Self) !usize {
         const index = std.mem.indexOf(u8, self.buffer[self.cursor..], ":") orelse 0;
         const int = self.buffer[self.cursor .. self.cursor + index];
@@ -102,15 +121,17 @@ const Bencode = struct {
     }
 };
 
+/// Builder is a helper struct that set the fields on the given Type
+/// based on the input given.
 fn Builder(comptime T: type) type {
     return struct {
         const Self = @This();
 
         field: []const u8,
         state: State,
-        val: T,
+        val: *T,
 
-        fn init(value: T) Self {
+        fn init(value: *T) Self {
             return Self{
                 .state = undefined,
                 .val = value,
@@ -146,18 +167,29 @@ fn Builder(comptime T: type) type {
                         buffer[index] = '_';
                     }
 
-                    // loop through fields so we can get the correct fieldname
-                    inline for (std.meta.fields(T)) |field| {
-                        // if field is current field, set it.
-                        if (std.mem.eql(u8, field.name, buffer)) {
-                            if (@TypeOf(@field(self.val, field.name)) == @TypeOf(str)) {
-                                @field(self.val, field.name) = str;
+                    // ensure T is a struct and get its fields
+                    switch (@typeInfo(T)) {
+                        .Struct => |struct_info| {
+                            inline for (struct_info.fields) |field| {
+                                // if field is current field, set it.
+                                if (std.mem.eql(u8, field.name, buffer)) {
+                                    if (@TypeOf(@field(self.val, field.name)) == @TypeOf(str)) {
+                                        @field(self.val, field.name) = str;
+                                    }
+                                    self.state = .SetField;
+                                }
                             }
-                            self.state = .SetField;
-                        }
+                        },
+                        else => {
+                            // Maybe implement later
+                            return error.UnsupportedType;
+                        },
                     }
+                    // loop through fields so we can get the correct fieldname
                 },
                 else => {
+                    // Only set a field when the input is of type []const u8
+                    // as names cannot be of any other type. This will be inlined by the compiler.
                     if (@TypeOf(str) == []const u8) {
                         self.field = str;
                     }
@@ -169,6 +201,7 @@ fn Builder(comptime T: type) type {
 }
 
 test "unmarshal basic string" {
+    // allow newlines to increase readability of test
     var bencode_string =
         \\d
         \\8:announce
@@ -194,14 +227,28 @@ test "unmarshal basic string" {
         piece_length: usize,
     };
 
-    const Bencode_struct = struct {
+    const Announce = struct {
         announce: []const u8,
         comment: []const u8,
         creation_date: usize,
         info: Info,
     };
 
+    const expected = Announce{
+        .announce = "http://bttracker.debian.org:6969/announce",
+        .comment = "\"Debian CD from cdimage.debian.org\"",
+        .creation_date = 1573903810,
+        .info = Info{
+            .length = 351272960,
+            .name = "debian-10.2.0-amd64-netinst.iso",
+            .piece_length = 262144,
+        },
+    };
+
     var bencode = Bencode.init(testing.allocator);
-    const result = try bencode.unmarshal(bencode_string, Bencode_struct);
-    std.debug.warn("\nannounce: {}\n", .{result.announce});
+    const result = try bencode.unmarshal(Announce, bencode_string);
+    testing.expectEqual(expected.creation_date, result.creation_date);
+    testing.expectEqualSlices(u8, expected.announce, result.announce);
+    testing.expectEqualSlices(u8, expected.info.name, result.info.name);
+    testing.expectEqualSlices(u8, expected.comment, result.comment);
 }
