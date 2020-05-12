@@ -1,9 +1,13 @@
 const std = @import("std");
 const testing = std.testing;
 const http = @import("net/http.zig");
+const Bencode = @import("bencode.zig").Bencode;
+const peer = @import("peer.zig");
 
+// The port we broadcast to connect with tcp
 const local_port: u16 = 6881;
 
+// sub struct, part of torrent bencode file
 const Info = struct {
     pieces: []const u8,
     pieceLen: usize,
@@ -11,13 +15,23 @@ const Info = struct {
     name: []const u8,
 };
 
+// Bencode file for torrent information
 const Torrent = struct {
     announce: []const u8,
     info: *Info,
 
+    /// creates a new `TorrentFile` from our bencode information
+    /// This also generates the hashes for each piece and the torrent info
     pub fn decode() TorrentFile {}
 };
 
+// Bencode file with tracker information
+const Tracker = struct {
+    interval: usize,
+    peers: []const u8,
+};
+
+// struct to hold URL query information
 const QueryParameter = struct {
     name: []const u8,
     value: []const u8,
@@ -59,19 +73,47 @@ const TorrentFile = struct {
         return try encodeUrl(allocator, self.announce, queries[0..]);
     }
 
+    /// Downloads the actual content and saves it to the given path
     fn download(self: @This(), allocator: *std.mem.Allocator, path: []const u8) !void {
+        // generate our unique 20-byte name
+        // the name looks like <RAMEN941hf94hg914t14>
         var peerID: [20]u8 = undefined;
         const appName = "RAMEN";
         std.mem.copy(peerID[0..], appName);
         try std.crypto.randomBytes(peerID[appName.len..]);
 
+        // build our peers to connect to
         const peers = try getPeers(allocator, peersID, local_port);
+
+        // attempt to connect to our peers
+        var fails: usize = 0;
+        for (peers) |p| {
+            if (std.net.tcpConnectToAddress(p.address)) |socket| {
+                socket.send()
+            } else |_| {
+                fails += 1;
+
+                // all peers failed
+                if (fails == peers.len) {
+                    return error.ConnectionFailed;
+                }
+            }
+        }
     }
 
+    /// calls the trackerURL to retrieve a list of peers and our interval
+    /// of when we can obtain a new list of peers.
     fn getPeers(self: @This(), allocator: *std.mem.Allocator, peerID: [20]u8, port: u16) ![]Peer {
         const url = try self.trackerURL(allocator, peerID, port);
 
         const resp = try http.get(allocator, url);
+
+        // the response is in bencode format, therefore decode it first
+        var bencode = try Bencode.init(allocator).unmarshal(TrackerBencode, resp);
+
+        // the peers are in binary format, so unmarshal those too.
+        var peers = try peer.unmarshal(allocator, bencode.peers);
+        return peers;
     }
 };
 

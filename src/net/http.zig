@@ -2,6 +2,7 @@ const std = @import("std");
 const Url = @import("url.zig").Url;
 const net = std.net;
 
+// TODO remove this when finished testing
 pub fn main() !void {
     const allocator = &std.heap.ArenaAllocator.init(std.heap.page_allocator).allocator;
     const url = "httpbin.org/get?test=1";
@@ -16,6 +17,7 @@ pub fn main() !void {
 pub fn get(allocator: *std.mem.Allocator, url: []const u8) !Response {
     const endpoint = Url.init(url);
 
+    // build our request header
     var buf = try allocator.alloc(u8, 4096);
     defer allocator.free(buf);
     const get_string = try std.fmt.bufPrint(buf, "GET {} HTTP/1.1\r\nHOST: {}\r\nConnection: close\r\n\r\n", .{

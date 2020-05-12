@@ -19,7 +19,11 @@ const Bencode = struct {
     }
 
     /// unmarshal tries to parse the given bencode bytes into Type T.
-    pub fn unmarshal(self: *Self, comptime T: type, bytes: []const u8) !T {
+    pub fn unmarshal(
+        self: *Self,
+        comptime T: type,
+        bytes: []const u8,
+    ) !T {
         self.cursor = 0; // reset cursor
         self.buffer = bytes;
         var decoded: T = undefined;
@@ -155,7 +159,11 @@ fn Builder(comptime T: type) type {
             self.state = .SetValue;
         }
 
-        fn set(self: *Self, str: var, allocator: *std.mem.Allocator) !void {
+        fn set(
+            self: *Self,
+            str: var,
+            allocator: *std.mem.Allocator,
+        ) !void {
             switch (self.state) {
                 .SetValue, .SetStruct => {
                     // save current field in a buffer so we can modify if required
