@@ -8,10 +8,10 @@ pub const Handshake = struct {
     peer: []const u8,
 
     /// Creates a new Handshake instance
-    pub fn init(hash: []const u8, peerID: []const u8) Handshake {
+    pub fn init(hash: []const u8, peer_id: []const u8) Handshake {
         return .{
             .hash = hash,
-            .peer = peerID,
+            .peer = peer_id,
         };
     }
 
@@ -27,10 +27,21 @@ pub const Handshake = struct {
         return buffer[0..i];
     }
 
-    /// Deserializes binary data into a handshake
-    pub fn deserialize(data: []u8) Handshake {
+    /// Reads from the `io.InStream` and parses the binary data into a `Handshake`
+    pub fn read(
+        allocator: *std.mem.Allocator,
+        stream: std.io.InStream(
+            std.fs.File,
+            std.os.ReadError,
+            std.fs.File.read,
+        ),
+    ) !Handshake {
         var i: usize = 20;
         var self: Handshake = undefined;
+        var data = try allocator.alloc(u8, 4096); //reserve 4kb
+        defer allocator.free(data);
+        _ = try stream.readAll(data);
+
         self.peer = data[data.len - i ..];
         i += self.peer.len;
         self.hash = data[data.len - i .. data.len - self.peer.len];

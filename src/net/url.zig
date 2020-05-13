@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// Struct that contains the scheme, host and path of an Url.
+/// Struct that contains the protocol, host and path of an Url.
 pub const Url = struct {
     protocol: []const u8,
     host: []const u8,
@@ -26,6 +26,7 @@ pub const Url = struct {
             }
         }
 
+        // for now we only support HTTP
         return Url{ .protocol = "http", .host = host, .path = path };
     }
 };

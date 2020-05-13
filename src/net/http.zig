@@ -30,7 +30,7 @@ pub fn get(allocator: *std.mem.Allocator, url: []const u8) !Response {
     _ = try socket.write(get_string);
 
     var parser = HttpParser.init(allocator);
-    return try parser.parse(&socket.inStream());
+    return try parser.parse(socket.inStream());
 }
 
 pub const ParseError = error{NoStatusCode};
@@ -78,7 +78,14 @@ pub const HttpParser = struct {
 
     /// parse accepts an `io.InStream`, it will read all data it contains
     /// and tries to parse it into a `Response`. Can return `ParseError` if data is corrupt
-    fn parse(self: *Self, stream: *std.io.InStream(std.fs.File, std.os.ReadError, std.fs.File.read)) !Response {
+    fn parse(
+        self: *Self,
+        stream: std.io.InStream(
+            std.fs.File,
+            std.os.ReadError,
+            std.fs.File.read,
+        ),
+    ) !Response {
         var response: Response = undefined;
         response.allocator = self.allocator;
 
