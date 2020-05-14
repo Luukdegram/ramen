@@ -31,6 +31,18 @@ const Bencode = struct {
         return decoded;
     }
 
+    /// Encodes the given struct into Bencode encoded bytes
+    pub fn marshal(
+        self: *Self,
+        comptime T: type,
+        value: var,
+        buffer: []u8,
+    ) !usize {
+        self.cursor = 0;
+        _ = try self.encode(T, value, buffer);
+        return self.cursor;
+    }
+
     fn parse(self: *Self, comptime T: type, value: *T) !void {
         var builder = Builder(T).init(value);
 
@@ -106,6 +118,51 @@ const Bencode = struct {
         return;
     }
 
+    /// recursive function that constructs a byte array containing bencoded data
+    fn encode(
+        self: *Self,
+        comptime T: type,
+        value: var,
+        buffer: []u8,
+    ) !usize {
+        std.mem.copy(u8, buffer[self.cursor..], "d");
+        self.cursor += 1;
+        switch (@typeInfo(T)) {
+            .Struct => |info| {
+                inline for (info.fields) |field| {
+                    switch (@typeInfo(field.field_type)) {
+                        .Struct => |child| {
+                            _ = try self.encode(field.field_type, @field(value, field.name), buffer);
+                        },
+                        .Int => {
+                            const print_result = try std.fmt.bufPrint(buffer[self.cursor..], "{}:{}{}:i{}e", .{
+                                field.name.len,
+                                field.name,
+                                intLength(@field(value, field.name)),
+                                @field(value, field.name),
+                            });
+                            self.cursor += print_result.len;
+                        },
+                        else => {
+                            var result = try std.fmt.bufPrint(buffer[self.cursor..], "{}:{}{}:{}", .{
+                                field.name.len,
+                                field.name,
+                                @field(value, field.name).len,
+                                @field(value, field.name),
+                            });
+                            self.cursor += result.len;
+                        },
+                    }
+                }
+            },
+            else => return error.NotSupported,
+        }
+        std.mem.copy(u8, buffer[self.cursor..], "e");
+        self.cursor += 1;
+
+        return self.cursor;
+    }
+
     // decodes a slice into a string based on the length provided in the slice
     // noted by xx: where xx is the length
     fn decodeString(self: *Self) ![]const u8 {
@@ -124,6 +181,19 @@ const Bencode = struct {
         return try std.fmt.parseInt(usize, int, 10);
     }
 };
+
+/// calculates the length of an integer
+/// i.e. the length of the number 502 is 3.
+fn intLength(val: usize) usize {
+    if (val <= 0) return 0;
+
+    var tmp: usize = val;
+    var i: usize = 1;
+    while (tmp > 9) : (i += 1) {
+        tmp /= 10;
+    }
+    return i;
+}
 
 /// Builder is a helper struct that set the fields on the given Type
 /// based on the input given.
@@ -259,4 +329,24 @@ test "unmarshal basic string" {
     testing.expectEqualSlices(u8, expected.announce, result.announce);
     testing.expectEqualSlices(u8, expected.info.name, result.info.name);
     testing.expectEqualSlices(u8, expected.comment, result.comment);
+}
+
+test "Encode struct to Bencode" {
+    const Child = struct {
+        field: []const u8 = "other value",
+    };
+    const TestStruct = struct {
+        name: []const u8 = "random value",
+        length: usize = 1236,
+        child: Child = Child{},
+    };
+
+    const value = TestStruct{};
+    var bencode = Bencode.init(testing.allocator);
+    var buffer = try testing.allocator.alloc(u8, 2048);
+    const result = try bencode.marshal(TestStruct, value, buffer);
+    defer testing.allocator.free(buffer);
+
+    const expected = "d4:name12:random value6:length4:i1236ed5:field11:other valueee";
+    testing.expectEqualSlices(u8, expected, buffer[0..result]);
 }
