@@ -44,8 +44,10 @@ pub const TcpClient = struct {
     }
 
     /// Reads bytes from the connection and deserializes it into a `Message` object.
-    pub fn read(self: Self) !msg.Message {
-        return msg.Message.read(self.socket.inStream());
+    /// This function allocates memory that must be freed.
+    /// If null returned, it's a keep-alive message.
+    pub fn read(self: Self) !?msg.Message {
+        return msg.Message.read(self.allocator, self.socket.inStream());
     }
 
     /// Sends a 'Request' message to the peer
@@ -55,43 +57,29 @@ pub const TcpClient = struct {
         begin: u32,
         length: u32,
     ) !void {
-        const message = msg.Message.requestMessage(self.allocator, index, begin, length);
-        defer self.allocator.free(request);
-        const buffer = message.serialize(self.allocator);
-        defer self.allocator.free(buffer);
+        const allocator = self.allocator;
+        const message = try msg.Message.requestMessage(allocator, index, begin, length);
+        defer allocator.free(request);
+        const buffer = message.serialize(allocator);
+        defer allocator.free(buffer);
         _ = try self.socket.write(buffer);
     }
 
-    /// Sends the 'Interested' message to the peer.
-    pub fn sendInterested(self: Self) !void {
-        const message = msg.Message.init(msg.MessageType.Interested);
-        var buffer = message.serialize(self.allocator);
-        defer self.allocator.free(buffer);
-        _ = try self.socket.write(buffer);
-    }
-
-    /// Sends the 'Not Interested' message to the peer.
-    pub fn sendNotInterested(self: Self) !void {
-        const message = msg.Message.init(msg.MessageType.NotInterested);
-        const buffer = message.serialize(self.allocator);
-        defer self.allocator.free(buffer);
-        _ = try self.socket.write(buffer);
-    }
-
-    /// Sends the 'Unchoke' message to the peer.
-    pub fn sendUnchoke(self: Self) !void {
-        const message = msg.Message.init(msg.MessageType.Unchoke);
-        const buffer = message.serialize(self.allocator);
+    /// Sends a message of the given `MessageType` to the peer.
+    pub fn sendTyped(self: Self, message_type: msg.MessageType) !void {
+        const message = msg.Message.init(message_type);
+        const buffer = try message.serialize(self.allocator);
         defer self.allocator.free(buffer);
         _ = try self.socket.write(buffer);
     }
 
     /// Sends the 'Have' message to the peer.
     pub fn sendHave(self: Self, index: u32) !void {
-        const have = msg.Message.haveMessage(self.allocator, index);
-        defer self.allocator.free(have);
-        const buffer = have.serialize(self.allocator);
-        defer self.allocator.free(buffer);
+        const allocator = self.allocator;
+        const have = msg.Message.haveMessage(allocator, index);
+        defer allocator.free(have);
+        const buffer = try have.serialize(allocator);
+        defer allocator.free(buffer);
         _ = try self.socket.write(buffer);
     }
 

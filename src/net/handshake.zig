@@ -16,10 +16,14 @@ pub const Handshake = struct {
     }
 
     /// Serializes a Handshake object into binary data
+    /// Must be freed after use
     pub fn serialize(self: @This(), allocator: *std.mem.Allocator) ![]u8 {
-        var buffer: []u8 = try allocator.alloc(u8, 1024);
-        std.mem.copy(u8, buffer[0..], self.p_str);
-        var i: usize = self.p_str.len + 8; // 8 reserved bytes
+        if (self.p_str.len > 19) return error.OutOfMemory;
+
+        var buffer: []u8 = try allocator.alloc(u8, self.p_str.len + 49);
+        std.mem.writeIntBig(u8, &buffer[0], @intCast(u8, self.p_str.len));
+        std.mem.copy(u8, buffer[1..], self.p_str);
+        var i: usize = self.p_str.len + 8 + 1; // 8 reserved bytes
         std.mem.copy(u8, buffer[i..], self.hash);
         i += self.hash.len;
         std.mem.copy(u8, buffer[i..], self.peer);
@@ -28,25 +32,21 @@ pub const Handshake = struct {
     }
 
     /// Reads from the `io.InStream` and parses the binary data into a `Handshake`
+    /// Must be freed after use.
     pub fn read(
-        allocator: *std.mem.Allocator,
-        stream: std.io.InStream(
-            std.fs.File,
-            std.os.ReadError,
-            std.fs.File.read,
-        ),
+        buffer: []u8,
+        stream: var,
     ) !Handshake {
+        if (buffer.len < 68) return error.BufferTooSmall;
         var i: usize = 20;
         var self: Handshake = undefined;
-        var data = try allocator.alloc(u8, 4096); //reserve 4kb
-        defer allocator.free(data);
-        _ = try stream.readAll(data);
+        const size = try stream.readAll(buffer);
 
-        self.peer = data[data.len - i ..];
+        self.peer = buffer[buffer.len - i ..];
         i += self.peer.len;
-        self.hash = data[data.len - i .. data.len - self.peer.len];
+        self.hash = buffer[size - i .. size - self.peer.len];
         i += 8; // 8 spare bytes
-        self.p_str = data[0 .. data.len - i];
+        self.p_str = buffer[1 .. size - i];
         return self;
     }
 };
@@ -59,7 +59,7 @@ test "Serialize handshake" {
 
     const result = try hs.serialize(testing.allocator);
     defer testing.allocator.free(result);
-    testing.expect(result.len == 67);
+    testing.expect(result.len == 68);
 }
 
 test "Deserialize handshake" {
@@ -70,6 +70,9 @@ test "Deserialize handshake" {
 
     const data = try hs.serialize(testing.allocator);
     defer testing.allocator.free(data);
-    const result = Handshake.deserialize(data);
-    testing.expect(std.mem.eql(u8, "BitTorrent protocol", result.p_str));
+    const stream = std.io.fixedBufferStream(data).inStream();
+    var buffer = try testing.allocator.alloc(u8, 100);
+    defer testing.allocator.free(buffer);
+    var result = try Handshake.read(buffer, stream);
+    testing.expectEqualSlices(u8, "BitTorrent protocol", result.p_str);
 }

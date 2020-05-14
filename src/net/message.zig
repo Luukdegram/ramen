@@ -69,7 +69,7 @@ pub const Message = struct {
         ),
     ) !?Self {
         var buffer = try allocator.alloc(u8, 4);
-        defer allocator.free(buffer);
+        errdefer allocator.free(buffer);
 
         const read = try stream.read(u8, buffer);
         if (read < buffer.len) return error.IncorrectLength;
@@ -78,7 +78,7 @@ pub const Message = struct {
         if (length == 0) return null; // keep-alive
 
         var payload = try allocator.alloc(u8, length);
-        defer allocator.free(payload);
+        errdefer allocator.free(payload);
         _ = try stream.readAll(payload);
 
         return .{ .message_type = @intToEnum(payload[0]), .payload = payload[1..] };
