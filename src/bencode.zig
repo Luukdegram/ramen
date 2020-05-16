@@ -1,13 +1,11 @@
 const std = @import("std");
 const testing = std.testing;
 
-const ParserError = error{BadStringLength};
-
 /// Bencode allows for parsing Bencode data
 /// It is up to the implementation to use nullable fields or not.
 /// Currently this does not check if a field is mandatory or not.
 /// Also, lists are currently not supported.
-const Bencode = struct {
+pub const Bencode = struct {
     const Self = @This();
 
     allocator: *std.mem.Allocator,
@@ -64,8 +62,6 @@ const Bencode = struct {
                 // directory -> new struct
                 'd' => {
                     if (builder.map()) {
-                        self.cursor += 1;
-
                         // save current field in a buffer so we can modify if required
                         // i.e. the field contains spaces so we want to replace it with an underscore.
                         var buffer = try self.allocator.alloc(u8, builder.field.len);
@@ -87,7 +83,7 @@ const Bencode = struct {
                                 }
                             },
                             else => {
-                                return error.NotImplemented;
+                                unreachable;
                             },
                         }
                     }
@@ -104,9 +100,16 @@ const Bencode = struct {
                     self.cursor += length + 1;
                 },
                 // array
-                'l' => {},
+                'l' => {
+                    self.cursor += 1;
+                    const list = try self.parseList();
+                    defer self.allocator.free(list); //TODO implement a way for user to deallocate this
+                    try builder.set(list, self.allocator);
+                    self.cursor += 1;
+                },
                 'e' => {
                     value.* = builder.val.*;
+                    self.cursor += 1;
                     return;
                 },
                 else => {
@@ -179,6 +182,15 @@ const Bencode = struct {
         self.cursor += index + 1;
 
         return try std.fmt.parseInt(usize, int, 10);
+    }
+
+    fn parseList(self: *Self) ![]const []const u8 {
+        var list = std.ArrayList([]const u8).init(self.allocator);
+        while (self.buffer[self.cursor] != 'e') {
+            const str = try self.decodeString();
+            try list.append(str);
+        }
+        return list.toOwnedSlice();
     }
 };
 
