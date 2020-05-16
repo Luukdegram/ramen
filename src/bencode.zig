@@ -103,7 +103,7 @@ pub const Bencode = struct {
                 'l' => {
                     self.cursor += 1;
                     const list = try self.parseList();
-                    defer self.allocator.free(list); //TODO implement a way for user to deallocate this
+                    errdefer self.allocator.free(list);
                     try builder.set(list, self.allocator);
                     self.cursor += 1;
                 },

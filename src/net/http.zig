@@ -2,16 +2,6 @@ const std = @import("std");
 const Url = @import("url.zig").Url;
 const net = std.net;
 
-// TODO remove this when finished testing
-pub fn main() !void {
-    const allocator = &std.heap.ArenaAllocator.init(std.heap.page_allocator).allocator;
-    const url = "httpbin.org/get?test=1";
-    const resp = try get(allocator, url);
-    defer resp.deinit();
-
-    std.debug.warn("{}", .{resp.body});
-}
-
 /// Sends a GET request to the given url.
 /// Returns a `Response` that contains the statuscode, headers and body.
 pub fn get(allocator: *std.mem.Allocator, url: []const u8) !Response {
