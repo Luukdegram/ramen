@@ -5,7 +5,7 @@ const net = std.net;
 /// Sends a GET request to the given url.
 /// Returns a `Response` that contains the statuscode, headers and body.
 pub fn get(allocator: *std.mem.Allocator, url: []const u8) !Response {
-    const endpoint = Url.init(url);
+    const endpoint = try Url.init(url);
 
     // build our request header
     var buf = try allocator.alloc(u8, 4096);
@@ -15,7 +15,7 @@ pub fn get(allocator: *std.mem.Allocator, url: []const u8) !Response {
         endpoint.host,
     });
 
-    const socket = try net.tcpConnectToHost(allocator, endpoint.host, 80);
+    const socket = try net.tcpConnectToHost(allocator, endpoint.host, endpoint.port);
     defer socket.close();
     _ = try socket.write(get_string);
 
@@ -34,13 +34,13 @@ pub const Header = struct {
 /// Http Response that contains the statuscode, headers and body of a Http request.
 /// deinit must be called to free its memory
 pub const Response = struct {
-    statusCode: []const u8,
+    status_code: []const u8,
     headers: []Header,
     body: []const u8,
     allocator: *std.mem.Allocator,
 
     fn deinit(self: @This()) void {
-        self.allocator.free(self.statusCode);
+        self.allocator.free(self.status_code);
         self.allocator.free(self.headers);
         self.allocator.free(self.body);
     }
@@ -93,7 +93,7 @@ pub const HttpParser = struct {
         while (try stream.readUntilDelimiterOrEof(buffer, '\n')) |bytes| {
             switch (self.state) {
                 .StatusCode => {
-                    response.statusCode = parseStatusCode(self.allocator, bytes) catch |err| return err;
+                    response.status_code = parseStatusCode(self.allocator, bytes) catch |err| return err;
                     self.state = .Header;
                 },
                 .Header => {

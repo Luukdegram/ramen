@@ -1,16 +1,17 @@
-const std = import("std");
+const std = @import("std");
 
-/// Message Types for the event loop
+/// Reserved message IDs
+/// Currently, they only contain the Core Protocol IDs
 pub const MessageType = enum {
-    Choke,
-    Unchoke,
-    Interested,
-    NotInterested,
-    Have,
-    Bitfield,
-    Request,
-    Piece,
-    Cancel,
+    Choke = 0x00,
+    Unchoke = 0x01,
+    Interested = 0x02,
+    NotInterested = 0x03,
+    Have = 0x04,
+    Bitfield = 0x5,
+    Request = 0x6,
+    Piece = 0x7,
+    Cancel = 0x8,
 };
 
 /// Messages are sent and received between us and the peer
@@ -71,8 +72,8 @@ pub const Message = struct {
         var buffer = try allocator.alloc(u8, 4);
         errdefer allocator.free(buffer);
 
-        const read = try stream.read(u8, buffer);
-        if (read < buffer.len) return error.IncorrectLength;
+        const read_len = try stream.read(buffer);
+        if (read_len < buffer.len) return error.IncorrectLength;
 
         const length = std.mem.readIntSliceBig(u32, buffer);
         if (length == 0) return null; // keep-alive
@@ -81,7 +82,7 @@ pub const Message = struct {
         errdefer allocator.free(payload);
         _ = try stream.readAll(payload);
 
-        return .{ .message_type = @intToEnum(payload[0]), .payload = payload[1..] };
+        return Self{ .message_type = @intToEnum(MessageType, @intCast(u4, payload[0])), .payload = payload[1..] };
     }
 
     /// Serializes a message into the given buffer with the following format

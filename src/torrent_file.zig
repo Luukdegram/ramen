@@ -6,14 +6,15 @@ const peer = @import("peer.zig");
 const Bencode = @import("bencode.zig").Bencode;
 const Torrent = @import("torrent.zig").Torrent;
 
-// The port we broadcast to connect with tcp
+/// Our port we connect from
+/// Default based on 'BEP 3': http://bittorrent.org/beps/bep_0003.html
 const local_port: u16 = 6881;
 
 // sub struct, part of torrent bencode file
 const Info = struct {
-    piece_length: usize,
     length: usize,
     name: []const u8,
+    piece_length: usize,
     pieces: []const u8,
 
     /// Generates a Sha1 hash of the info metadata.
@@ -29,9 +30,7 @@ const Info = struct {
 
         // create sha1 hash of bencoded info
         var result: [20]u8 = undefined;
-        var sha1 = std.crypto.Sha1.init();
-        sha1.update(buffer[0..length]);
-        sha1.final(&result);
+        std.crypto.Sha1.hash(buffer[0..length], &result);
         return result;
     }
 
@@ -61,7 +60,7 @@ const TorrentMeta = struct {
 
     /// creates a new `TorrentFile` from our bencode information
     /// This also generates the hashes for each piece and the torrent info
-    pub fn generateTorrentFile(self: @This(), allocator: *std.mem.Allocator) !TorrentFile {
+    pub fn file(self: @This(), allocator: *std.mem.Allocator) !TorrentFile {
         const info = self.info;
         var hash: [20]u8 = undefined;
         hash = try info.hash(allocator);
@@ -94,7 +93,7 @@ const QueryParameter = struct {
 };
 
 /// TorrentFile represents the data structure needed to retreive all torrent data
-const TorrentFile = struct {
+pub const TorrentFile = struct {
     const Self = @This();
     /// the URL to be called to retreive torrent data from
     announce: []const u8,
@@ -114,7 +113,7 @@ const TorrentFile = struct {
     buffer: []const u8,
 
     /// Generates the URL to retreive tracker information
-    pub fn trackerURL(self: Self, allocator: *std.mem.Allocator, peer_id: []const u8, port: u16) ![]const u8 {
+    pub fn trackerURL(self: Self, allocator: *std.mem.Allocator, peer_id: [20]u8, port: u16) ![]const u8 {
         // build our query paramaters
         const port_slice = try intToSlice(allocator, port);
         defer allocator.free(port_slice);
@@ -123,7 +122,7 @@ const TorrentFile = struct {
 
         const queries = [_]QueryParameter{
             .{ .name = "info_hash", .value = &self.hash },
-            .{ .name = "peer_id", .value = peer_id },
+            .{ .name = "peer_id", .value = &peer_id },
             .{ .name = "port", .value = port_slice },
             .{ .name = "uploaded", .value = "0" },
             .{ .name = "downloaded", .value = "0" },
@@ -141,46 +140,47 @@ const TorrentFile = struct {
     }
 
     /// Downloads the actual content and saves it to the given path
-    pub fn download(self: Self, path: []const u8) !void {
-        // generate our unique 20-byte name
-        // the name looks like <RAMEN941hf94hg914t14>
-        var peer_id: [20]u8 = undefined;
-        const appName = "RAMEN";
-        std.mem.copy(&peer_id, appName);
-        try std.crypto.randomBytes(peer_id[appName.len..]);
-
+    pub fn download(self: *Self, path: []const u8) !void {
         // build our peers to connect to
+        const peer_id = try generatePeerId();
         const peers = try self.getPeers(peer_id, local_port);
 
         const torrent = Torrent{
             .peers = peers,
             .peer_id = peer_id,
-            .file = &self,
+            .file = self,
         };
 
         // create destination file
+        const full_path = try std.fs.path.join(self.allocator, &[_][]const u8{
+            path,
+            self.name,
+        });
+
+        defer self.allocator.free(full_path);
         const cwd = std.fs.cwd();
-        const file = try cwd.createFile(path, .{ .lock = .Exclusive });
-        defer file.closer();
+        const file = try cwd.createFile(full_path, .{ .lock = .Exclusive });
+        defer file.close();
 
         // This is blocking
-        try torrent.download(file.outStream());
+        try torrent.download(self.allocator, file.outStream());
     }
 
     /// calls the trackerURL to retrieve a list of peers and our interval
     /// of when we can obtain a new list of peers.
-    fn getPeers(self: Self, peer_id: [20]u8, port: u16) ![]Peer {
+    fn getPeers(self: Self, peer_id: [20]u8, port: u16) ![]peer.Peer {
         const allocator = self.allocator;
         const url = try self.trackerURL(allocator, peer_id, port);
 
         const resp = try http.get(allocator, url);
 
+        if (!std.mem.eql(u8, resp.status_code, "200")) return error.CouldNotConnect;
+
         // the response is in bencode format, therefore decode it first
-        var bencode = try Bencode.init(allocator).unmarshal(TrackerBencode, resp);
+        var bencode = try Bencode.init(allocator).unmarshal(Tracker, resp.body);
 
         // the peers are in binary format, so unmarshal those too.
-        var peers = try peer.unmarshal(allocator, bencode.peers);
-        return peers;
+        return peer.unmarshal(allocator, bencode.peers);
     }
 
     /// Opens a torrentfile from the given path
@@ -203,11 +203,34 @@ const TorrentFile = struct {
         //TODO Remove this when we implement seeding. For now free its memory to silence errors
         allocator.free(torrent.httpseeds);
 
-        var torrent_file = try torrent.generateTorrentFile(allocator);
+        var torrent_file = try torrent.file(allocator);
         torrent_file.buffer = buffer;
         return torrent_file;
     }
 };
+
+/// generates a *new* peer_id, everytime this gets called.
+fn generatePeerId() ![20]u8 {
+    // full peer_id
+    var peer_id: [20]u8 = undefined;
+    // our app name which will always remain the same
+    const app_name = "RAMEN";
+    std.mem.copy(u8, &peer_id, app_name);
+
+    // generate a random seed
+    var buf: [8]u8 = undefined;
+    try std.crypto.randomBytes(&buf);
+    const seed = std.mem.readIntLittle(u64, &buf);
+
+    // generate next bytes
+    var bytes: [15]u8 = undefined;
+    var r = std.rand.DefaultPrng.init(seed);
+    for (peer_id[app_name.len..]) |*b| {
+        b.* = 'a';
+    }
+
+    return peer_id;
+}
 
 /// encodes queries into a query string attached to the provided base
 /// i.e. results example.com?parm=val where `base` is example.com

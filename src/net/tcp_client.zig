@@ -17,11 +17,11 @@ pub const TcpClient = struct {
 
     /// initiates a new Client
     pub fn init(
-        allocator: *std.mem.allocator,
+        allocator: *std.mem.Allocator,
         peer: Peer,
         hash: [20]u8,
         peer_id: [20]u8,
-    ) !Self {
+    ) Self {
         return .{
             .peer = peer,
             .hash = hash,
@@ -33,13 +33,14 @@ pub const TcpClient = struct {
     /// Creates a connection with the peer
     pub fn connect(self: *Self) !void {
         const socket = try std.net.tcpConnectToAddress(self.peer.address);
+        self.socket = socket;
         errdefer socket.close();
 
         // initialize our handshake
         _ = try self.handshake();
 
         // receive the Bitfield so we can start sending messages (optional)
-        bitfield = try self.getBitfield();
+        const bitfield = try self.getBitfield();
         self.bitfield = bitfield;
     }
 
@@ -47,7 +48,7 @@ pub const TcpClient = struct {
     /// This function allocates memory that must be freed.
     /// If null returned, it's a keep-alive message.
     pub fn read(self: Self) !?msg.Message {
-        return msg.Message.read(self.allocator, self.socket.inStream());
+        return msg.Message.read(self.allocator, self.socket.?.inStream());
     }
 
     /// Sends a 'Request' message to the peer
@@ -62,7 +63,7 @@ pub const TcpClient = struct {
         defer allocator.free(request);
         const buffer = message.serialize(allocator);
         defer allocator.free(buffer);
-        _ = try self.socket.write(buffer);
+        _ = try self.socket.?.write(buffer);
     }
 
     /// Sends a message of the given `MessageType` to the peer.
@@ -70,7 +71,7 @@ pub const TcpClient = struct {
         const message = msg.Message.init(message_type);
         const buffer = try message.serialize(self.allocator);
         defer self.allocator.free(buffer);
-        _ = try self.socket.write(buffer);
+        _ = try self.socket.?.write(buffer);
     }
 
     /// Sends the 'Have' message to the peer.
@@ -80,33 +81,37 @@ pub const TcpClient = struct {
         defer allocator.free(have);
         const buffer = try have.serialize(allocator);
         defer allocator.free(buffer);
-        _ = try self.socket.write(buffer);
+        _ = try self.socket.?.write(buffer);
     }
 
     /// Closes the connection
     pub fn close(self: Self) void {
-        self.socket.close();
+        self.socket.?.close();
+        self.peer.deinit(self.allocator);
     }
 
     /// Initiates a handshake between the peer and us.
     fn handshake(self: Self) !Handshake {
-        var hs = Handshake.init(self.hash, self.peer);
+        var hs = Handshake.init(self.hash, self.id);
 
-        _ = try self.socket.write(hs.serialize(self.allocator));
+        _ = try self.socket.?.write(try hs.serialize(self.allocator));
 
-        const response = try Handshake.read(self.allocator, self.socket.inStream());
+        var tmp = try self.allocator.alloc(u8, 100);
+        defer self.allocator.free(tmp);
+        const response = try Handshake.read(tmp, self.socket.?.inStream());
 
-        if (!std.mem.eql(u8, self.hash, response.hash)) return error.IncorrectHash;
+        if (!std.mem.eql(u8, &self.hash, &response.hash)) return error.IncorrectHash;
 
         return response;
     }
 
     /// Attempt to receive a bitfield from the peer.
     fn getBitfield(self: Self) ![]const u8 {
-        const message = try msg.Message.read(self.allocator, self.socket.inStream());
+        std.debug.warn("Getting bitfield\n", .{});
+        const message = try msg.Message.read(self.allocator, self.socket.?.inStream());
 
-        if (msg.message_type != message.MessageType.Bitfield) return error.UnexpectedMessageType;
+        if (message.?.message_type != msg.MessageType.Bitfield) return error.UnexpectedMessageType;
 
-        return message.payload;
+        return message.?.payload;
     }
 };

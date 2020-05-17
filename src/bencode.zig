@@ -133,15 +133,22 @@ pub const Bencode = struct {
         switch (@typeInfo(T)) {
             .Struct => |info| {
                 inline for (info.fields) |field| {
+                    // save current field in a buffer so we can modify if required
+                    // i.e. the field contains an underscode so we want to replace it with a space.
+                    var field_name = try self.allocator.alloc(u8, field.name.len);
+                    std.mem.copy(u8, field_name, field.name);
+                    defer self.allocator.free(field_name);
+                    if (std.mem.indexOf(u8, field_name, "_")) |index| {
+                        field_name[index] = ' ';
+                    }
                     switch (@typeInfo(field.field_type)) {
                         .Struct => |child| {
                             _ = try self.encode(field.field_type, @field(value, field.name), buffer);
                         },
-                        .Int => {
-                            const print_result = try std.fmt.bufPrint(buffer[self.cursor..], "{}:{}{}:i{}e", .{
+                        .Int, .Float => {
+                            const print_result = try std.fmt.bufPrint(buffer[self.cursor..], "{}:{}i{}e", .{
                                 field.name.len,
-                                field.name,
-                                intLength(@field(value, field.name)),
+                                field_name,
                                 @field(value, field.name),
                             });
                             self.cursor += print_result.len;
@@ -149,7 +156,7 @@ pub const Bencode = struct {
                         else => {
                             var result = try std.fmt.bufPrint(buffer[self.cursor..], "{}:{}{}:{}", .{
                                 field.name.len,
-                                field.name,
+                                field_name,
                                 @field(value, field.name).len,
                                 @field(value, field.name),
                             });

@@ -4,11 +4,11 @@ const testing = std.testing;
 /// Handshake identifies the connection between us and the peers
 pub const Handshake = struct {
     p_str: []const u8 = "BitTorrent protocol",
-    hash: []const u8,
-    peer: []const u8,
+    hash: [20]u8,
+    peer: [20]u8,
 
     /// Creates a new Handshake instance
-    pub fn init(hash: []const u8, peer_id: []const u8) Handshake {
+    pub fn init(hash: [20]u8, peer_id: [20]u8) Handshake {
         return .{
             .hash = hash,
             .peer = peer_id,
@@ -24,9 +24,9 @@ pub const Handshake = struct {
         std.mem.writeIntBig(u8, &buffer[0], @intCast(u8, self.p_str.len));
         std.mem.copy(u8, buffer[1..], self.p_str);
         var i: usize = self.p_str.len + 8 + 1; // 8 reserved bytes
-        std.mem.copy(u8, buffer[i..], self.hash);
+        std.mem.copy(u8, buffer[i..], &self.hash);
         i += self.hash.len;
-        std.mem.copy(u8, buffer[i..], self.peer);
+        std.mem.copy(u8, buffer[i..], &self.peer);
         i += self.peer.len;
         return buffer[0..i];
     }
@@ -42,11 +42,13 @@ pub const Handshake = struct {
         var self: Handshake = undefined;
         const size = try stream.readAll(buffer);
 
-        self.peer = buffer[buffer.len - i ..];
-        i += self.peer.len;
-        self.hash = buffer[size - i .. size - self.peer.len];
-        i += 8; // 8 spare bytes
-        self.p_str = buffer[1 .. size - i];
+        const length = std.mem.readIntBig(u8, &buffer[0]);
+        if (length == 0 or length > 19) return error.BadHandshake;
+
+        self.p_str = buffer[1..length];
+        std.mem.copy(u8, &self.hash, buffer[length + 9 .. length + 29]);
+        std.mem.copy(u8, &self.peer, buffer[length + 29 .. length + 49]);
+
         return self;
     }
 };
