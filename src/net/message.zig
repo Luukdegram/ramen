@@ -32,14 +32,14 @@ pub const Message = struct {
     pub fn parsePiece(
         self: Self,
         buffer: []u8,
-        index: u32,
+        index: usize,
     ) !usize {
         if (self.message_type != .Piece) return error.IncorrectMessageType;
 
         if (self.payload.len < 8) return error.IncorrectPayload;
 
         const p_index = std.mem.readIntSliceBig(u32, self.payload[0..4]);
-        if (p_index != index) return error.IncorrectIndex;
+        if (p_index != @intCast(u32, index)) return error.IncorrectIndex;
 
         const begin = std.mem.readIntSliceBig(u32, self.payload[4..8]);
         if (begin > buffer.len) return error.IncorrectOffset;
@@ -47,7 +47,7 @@ pub const Message = struct {
         const data = self.payload[8..];
         if (data.len > buffer.len) return error.OutOfMemory;
 
-        std.mem.copy(buffer[begin..], data);
+        std.mem.copy(u8, buffer[begin..], data);
         return data.len;
     }
 
@@ -88,10 +88,10 @@ pub const Message = struct {
     /// Serializes a message into the given buffer with the following format
     /// <length><message_type><payload>
     pub fn serialize(self: Self, allocator: *std.mem.Allocator) ![]const u8 {
-        const length = self.payload.len + 1; // type's length is 1 byte
+        const length: u32 = @intCast(u32, self.payload.len) + 1; // type's length is 1 byte
         var buffer = try allocator.alloc(u8, length + 4); // 4 for length
 
-        std.mem.writeIntBig(u32, &buffer[0..4], length);
+        std.mem.writeIntBig(u32, buffer[0..4], length);
         std.mem.writeIntBig(u8, &buffer[4], @enumToInt(self.message_type));
         std.mem.copy(u8, buffer[5..], self.payload);
 
@@ -101,25 +101,25 @@ pub const Message = struct {
     /// Creates a `Message` with the type Request
     pub fn requestMessage(
         allocator: *std.mem.Allocator,
-        index: u32,
-        begin: u32,
-        length: u32,
+        index: usize,
+        begin: usize,
+        length: usize,
     ) !Self {
         var buffer = try allocator.alloc(u8, 12);
 
-        std.mem.writeIntBig(u32, &buffer[0..4], index);
-        std.mem.writeIntBig(u32, &buffer[4..8], begin);
-        std.mem.writeIntBig(u32, &buffer[8..], length);
+        std.mem.writeIntBig(u32, buffer[0..4], @intCast(u32, index));
+        std.mem.writeIntBig(u32, buffer[4..8], @intCast(u32, begin));
+        std.mem.writeIntBig(u32, buffer[8..12], @intCast(u32, length));
 
-        return .{ .message_type = .Request, .payload = buffer };
+        return Self{ .message_type = .Request, .payload = buffer };
     }
 
     /// Creates a `Message` with the type Have
-    pub fn haveMessage(allocator: *std.mem.Allocator, index: u32) !Self {
+    pub fn haveMessage(allocator: *std.mem.Allocator, index: usize) !Self {
         var buffer = try allocator.alloc(u8, 4);
 
-        std.mem.writeIntBig(u32, &buffer, index);
+        std.mem.writeIntBig(u32, buffer[0..4], @intCast(u32, index));
 
-        return .{ .message_type = .Have, .payload = buffer };
+        return Self{ .message_type = .Have, .payload = buffer };
     }
 };

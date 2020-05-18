@@ -1,10 +1,13 @@
 const std = @import("std");
+const bitfield = @import("net/bitfield.zig");
 
 const Peer = @import("peer.zig").Peer;
 const TorrentFile = @import("torrent_file.zig").TorrentFile;
 const Worker = @import("worker.zig").Worker;
 const Work = @import("worker.zig").Work;
 const WorkerContext = @import("worker.zig").WorkerContext;
+const MessageType = @import("net/message.zig").MessageType;
+const Client = @import("net/tcp_client.zig").TcpClient;
 
 pub const Torrent = struct {
     const Self = @This();
@@ -21,16 +24,12 @@ pub const Torrent = struct {
         allocator: *std.mem.Allocator,
         stream: var,
     ) !void {
-        std.debug.warn("Downloaded started for torrent: {}\n", .{self.file.name});
+        std.debug.warn("Download started for torrent: {}\n", .{self.file.name});
 
         // Creates jobs for all pieces that needs to be downloaded
         var jobs = try allocator.alloc(Work, self.file.piece_hashes.len);
         for (self.file.piece_hashes) |hash, i| {
-            const work = Work{
-                .index = i,
-                .hash = hash,
-                .size = self.pieceSize(i),
-            };
+            const work = try Work.init(i, hash, self.pieceSize(i), allocator);
             jobs[i] = work;
         }
 
@@ -43,14 +42,19 @@ pub const Torrent = struct {
             .worker = &worker,
         };
 
-        var threads = try allocator.alloc(*std.Thread, 2);
-        for (threads) |*t| {
-            t.* = try std.Thread.spawn(&context, downloadWork);
-        }
+        // var threads = try allocator.alloc(*std.Thread, 2);
+        // for (threads) |*t| {
+        //     t.* = try std.Thread.spawn(&context, downloadWork);
+        // }
 
-        for (threads) |t| {
-            t.wait();
-        }
+        // for (threads) |t| {
+        //     t.wait();
+        // }
+
+        // //clear memory
+        // for (jobs) |work| {
+        //     work.deinit();
+        // }
     }
 
     /// Returns the bounds of a piece by its index
@@ -82,14 +86,30 @@ pub const Torrent = struct {
 
 /// Downloads all pieces of work distributed to multiple peers/threads
 fn downloadWork(ctx: *WorkerContext) !void {
-    std.debug.warn("Started work", .{});
+    std.debug.warn("ETAEGHITET\n", .{});
     var worker = ctx.worker;
     if (worker.getClient()) |*client| {
+        std.debug.warn("Attempt to connect to peer {}\n", .{client.peer.ip});
         client.connect() catch |err| {
             std.debug.warn("Could not connect to peer {} - err: {}\n", .{ client.peer.ip, err });
             return;
         };
-        std.debug.warn("Connected to peer {}", .{client.peer.ip});
         defer client.close();
+        std.debug.warn("Connected to peer {}\n", .{client.peer.ip});
+
+        try client.sendTyped(MessageType.Unchoke);
+        try client.sendTyped(MessageType.Interested);
+
+        // while (worker.next()) |*work| {
+        //     std.debug.warn("Downloading work: {}", .{work.index});
+        //     // try work.download(client);
+        //     // if (!work.eqlHash()) {
+        //     //     std.debug.warn("Failed checksum hash\n", .{});
+        //     //     try worker.put(work.*);
+        //     //     continue;
+        //     // }
+
+        //     // try client.sendHave(work.index);
+        // }
     }
 }
