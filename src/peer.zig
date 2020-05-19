@@ -4,10 +4,6 @@ const std = @import("std");
 pub const Peer = struct {
     address: std.net.Address,
     ip: []const u8,
-
-    fn deinit(self: @This(), allocator: *std.mem.Allocator) void {
-        allocator.free(self.ip);
-    }
 };
 
 /// Parses the provided bytes into an array of Peers

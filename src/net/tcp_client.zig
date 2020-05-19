@@ -7,16 +7,22 @@ const Handshake = @import("handshake.zig").Handshake;
 /// Client represents a connection between a peer and us
 pub const TcpClient = struct {
     const Self = @This();
-
+    /// peer we are connected to
     peer: Peer,
-    bitfield: []u8,
+    /// bit representation of the pieces we have
+    bitfield: ?Bitfield = null,
+    /// hash of meta info
     hash: [20]u8,
+    /// unique id we represent ourselves with to our peer
     id: [20]u8,
+    /// memory allocator
     allocator: *std.mem.Allocator,
+    /// socket that handles our tcp connection and read/write from/to
     socket: std.fs.File,
-    choked: bool = false,
+    /// determines if we are choked by the peer, this is true by default
+    choked: bool = true,
 
-    /// initiates a new Client
+    /// initiates a new Client, to connect call connect()
     pub fn init(
         allocator: *std.mem.Allocator,
         peer: Peer,
@@ -33,7 +39,34 @@ pub const TcpClient = struct {
         };
     }
 
-    /// Creates a connection with the peer
+    const Bitfield = struct {
+        buffer: []u8,
+
+        /// hasPiece checks if the specified index contains a bit of 1
+        pub fn hasPiece(self: Bitfield, index: usize) bool {
+            var buffer = self.buffer;
+            const byte_index = index / 8;
+            const offset = index % 8;
+            if (byte_index < 0 or byte_index > buffer.len) return false;
+
+            return buffer[byte_index] >> (7 - @intCast(u3, offset)) & 1 != 0;
+        }
+
+        /// Sets a bit inside the bitfield to 1
+        pub fn setPiece(self: *Bitfield, index: usize) void {
+            //var buffer = self.buffer;
+            const byte_index = index / 8;
+            const offset = index % 8;
+
+            // if out of bounds, simply don't write the bit
+            if (byte_index >= 0 and byte_index < self.buffer.len) {
+                self.buffer[byte_index] |= @as(u8, 1) << (7 - @intCast(u3, offset));
+            }
+        }
+    };
+
+    /// Creates a connection with the peer,
+    /// this fails if we cannot receive a proper handshake
     pub fn connect(self: *Self) !void {
         var socket = try std.net.tcpConnectToAddress(self.peer.address);
         self.socket = socket;
@@ -42,10 +75,10 @@ pub const TcpClient = struct {
         // initialize our handshake
         _ = try self.handshake();
 
-        //receive the Bitfield so we can start sending messages (optional)
-        // if (try self.getBitfield()) |bitfield| {
-        //     self.bitfield = bitfield;
-        // }
+        //receive the Bitfield so we can start sending messages
+        if (try self.getBitfield()) |bitfield| {
+            self.bitfield = Bitfield{ .buffer = bitfield };
+        }
     }
 
     /// Reads bytes from the connection and deserializes it into a `Message` object.
@@ -71,7 +104,7 @@ pub const TcpClient = struct {
     }
 
     /// Sends a message of the given `MessageType` to the peer.
-    pub fn sendTyped(self: Self, message_type: msg.MessageType) !void {
+    pub fn send(self: Self, message_type: msg.MessageType) !void {
         const message = msg.Message.init(message_type);
         const buffer = try message.serialize(self.allocator);
         defer self.allocator.free(buffer);
@@ -91,7 +124,7 @@ pub const TcpClient = struct {
     /// Closes the connection
     pub fn close(self: Self) void {
         self.socket.close();
-        self.peer.deinit(self.allocator);
+        self.allocator.free(self.peer.ip);
     }
 
     /// Initiates a handshake between the peer and us.
@@ -100,7 +133,8 @@ pub const TcpClient = struct {
 
         _ = try self.socket.write(try hs.serialize(self.allocator));
 
-        var tmp = try self.allocator.alloc(u8, 100);
+        // handshake is a fixed-size message and requires to be 68 bytes long.
+        var tmp = try self.allocator.alloc(u8, 68);
         defer self.allocator.free(tmp);
         const response = try Handshake.read(tmp, self.socket.inStream());
 
@@ -110,7 +144,7 @@ pub const TcpClient = struct {
     }
 
     /// Attempt to receive a bitfield from the peer.
-    fn getBitfield(self: Self) !?[]const u8 {
+    fn getBitfield(self: Self) !?[]u8 {
         if (try msg.Message.read(self.allocator, self.socket.inStream())) |message| {
             if (message.message_type != msg.MessageType.Bitfield) return error.UnexpectedMessageType;
             return message.payload;

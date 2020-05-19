@@ -17,7 +17,7 @@ pub const WorkerContext = struct {
 pub const Worker = struct {
     const Self = @This();
     mutex: *std.Mutex,
-    work: std.PriorityQueue(Work),
+    work: *std.PriorityQueue(Work),
     torrent: *const Torrent,
     workers: usize,
     allocator: *Allocator,
@@ -27,11 +27,11 @@ pub const Worker = struct {
         allocator: *Allocator,
         mutex: *std.Mutex,
         torrent: *const Torrent,
-        work: []Work,
+        work: *std.PriorityQueue(Work),
     ) Self {
         return Self{
             .mutex = mutex,
-            .work = std.PriorityQueue(Work).fromOwnedSlice(allocator, compare, work),
+            .work = work,
             .torrent = torrent,
             .workers = torrent.peers.len,
             .allocator = allocator,
@@ -65,11 +65,6 @@ pub const Worker = struct {
     }
 };
 
-/// determines the position in the queue
-fn compare(a: Work, b: Work) bool {
-    return a.index < b.index;
-}
-
 /// A piece of work that needs to be done
 pub const Work = struct {
     const Self = @This();
@@ -86,13 +81,13 @@ pub const Work = struct {
         hash: [20]u8,
         size: usize,
         allocator: *std.mem.Allocator,
-    ) !Self {
+    ) Self {
         return Self{
             .index = index,
             .hash = hash,
             .size = size,
             .allocator = allocator,
-            .buffer = try allocator.alloc(u8, size),
+            .buffer = undefined,
         };
     }
 
@@ -103,12 +98,11 @@ pub const Work = struct {
         var backlog: usize = 0;
 
         // request to the peer for more bytes
-        while (downloaded < self.size) : (backlog += 1) {
+        while (downloaded < self.size) {
             // if we are not choked, request for bytes
             if (!client.choked) {
-                while (backlog < max_items and requested < self.size) {
+                while (backlog < max_items and requested < self.size) : (backlog += 1) {
                     const block_size = if (self.size - requested < max_block_size) self.size - requested else max_block_size;
-
                     try client.sendRequest(self.index, requested, block_size);
                     requested += block_size;
                 }
@@ -117,10 +111,16 @@ pub const Work = struct {
             // read the message we received, this is blocking
             if (try client.read()) |message| {
                 switch (message.message_type) {
-                    .Unchoke => client.choked = false,
                     .Choke => client.choked = true,
-                    .Have => {},
+                    .Unchoke => client.choked = false,
+                    .Have => {
+                        const index = try message.parseHave();
+                        if (client.bitfield) |*bitfield| {
+                            bitfield.setPiece(index);
+                        }
+                    },
                     .Piece => {
+                        self.buffer = try self.allocator.alloc(u8, self.size);
                         const size = try message.parsePiece(self.buffer, self.index);
                         downloaded += size;
                         backlog -= 1;

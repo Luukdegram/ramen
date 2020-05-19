@@ -2,16 +2,17 @@ const std = @import("std");
 
 /// Reserved message IDs
 /// Currently, they only contain the Core Protocol IDs
-pub const MessageType = enum {
-    Choke = 0x00,
-    Unchoke = 0x01,
-    Interested = 0x02,
-    NotInterested = 0x03,
-    Have = 0x04,
-    Bitfield = 0x5,
-    Request = 0x6,
-    Piece = 0x7,
-    Cancel = 0x8,
+pub const MessageType = enum(u8) {
+    Choke,
+    Unchoke,
+    Interested,
+    NotInterested,
+    Have,
+    Bitfield,
+    Request,
+    Piece,
+    Cancel,
+    _,
 };
 
 /// Messages are sent and received between us and the peer
@@ -20,7 +21,7 @@ pub const Message = struct {
     const Self = @This();
 
     message_type: MessageType,
-    payload: []const u8,
+    payload: []u8,
 
     /// Creates an empty message of the given type.
     pub fn init(message_type: MessageType) Self {
@@ -38,26 +39,25 @@ pub const Message = struct {
 
         if (self.payload.len < 8) return error.IncorrectPayload;
 
-        const p_index = std.mem.readIntSliceBig(u32, self.payload[0..4]);
+        const p_index = std.mem.readIntBig(u32, self.payload[0..4]);
         if (p_index != @intCast(u32, index)) return error.IncorrectIndex;
 
-        const begin = std.mem.readIntSliceBig(u32, self.payload[4..8]);
+        const begin = std.mem.readIntBig(u32, self.payload[4..8]);
         if (begin > buffer.len) return error.IncorrectOffset;
 
         const data = self.payload[8..];
         if (data.len > buffer.len) return error.OutOfMemory;
-
         std.mem.copy(u8, buffer[begin..], data);
         return data.len;
     }
 
-    /// Parses current `MessageType.Have` message and returns the length.
+    /// Parses current `MessageType.Have` message and returns the index.
     pub fn parseHave(self: Self) !usize {
         if (self.message_type != .Have) return error.IncorrectMessageType;
 
         if (self.payload.len != 4) return error.IncorrectLength;
 
-        return std.mem.readIntSliceBig(u32, self.payload);
+        return std.mem.readIntBig(u32, self.payload[0..4]);
     }
 
     /// Reads from an `io.Instream` and parses its content into a Message.
@@ -70,19 +70,22 @@ pub const Message = struct {
         ),
     ) !?Self {
         var buffer = try allocator.alloc(u8, 4);
-        errdefer allocator.free(buffer);
+        defer allocator.free(buffer);
 
-        const read_len = try stream.read(buffer);
-        if (read_len < buffer.len) return error.IncorrectLength;
+        const read_len = stream.read(buffer) catch {
+            return null;
+        };
 
-        const length = std.mem.readIntSliceBig(u32, buffer);
+        const length = std.mem.readIntBig(u32, buffer[0..4]);
         if (length == 0) return null; // keep-alive
-
         var payload = try allocator.alloc(u8, length);
         errdefer allocator.free(payload);
-        _ = try stream.readAll(payload);
+        const payload_size = stream.readAll(payload) catch {
+            allocator.free(payload);
+            return null;
+        };
 
-        return Self{ .message_type = @intToEnum(MessageType, @intCast(u4, payload[0])), .payload = payload[1..] };
+        return Self{ .message_type = @intToEnum(MessageType, payload[0]), .payload = payload[1..] };
     }
 
     /// Serializes a message into the given buffer with the following format
@@ -92,7 +95,7 @@ pub const Message = struct {
         var buffer = try allocator.alloc(u8, length + 4); // 4 for length
 
         std.mem.writeIntBig(u32, buffer[0..4], length);
-        std.mem.writeIntBig(u8, &buffer[4], @enumToInt(self.message_type));
+        buffer[4] = @enumToInt(self.message_type);
         std.mem.copy(u8, buffer[5..], self.payload);
 
         return buffer;

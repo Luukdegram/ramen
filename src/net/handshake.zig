@@ -21,7 +21,7 @@ pub const Handshake = struct {
         if (self.p_str.len > 19) return error.OutOfMemory;
 
         var buffer: []u8 = try allocator.alloc(u8, self.p_str.len + 49);
-        std.mem.writeIntBig(u8, &buffer[0], @intCast(u8, self.p_str.len));
+        buffer[0] = @intCast(u8, self.p_str.len);
         std.mem.copy(u8, buffer[1..], self.p_str);
         var i: usize = self.p_str.len + 8 + 1; // 8 reserved bytes
         std.mem.copy(u8, buffer[i..], &self.hash);
@@ -37,10 +37,10 @@ pub const Handshake = struct {
         buffer: []u8,
         stream: var,
     ) !Handshake {
-        if (buffer.len < 68) return error.BufferTooSmall;
+        if (buffer.len != 68) return error.IncorrectBufferSize;
         var i: usize = 20;
         var self: Handshake = undefined;
-        const size = try stream.readAll(buffer);
+        const size = try stream.read(buffer);
 
         const length = std.mem.readIntBig(u8, &buffer[0]);
         if (length == 0 or length > 19) return error.BadHandshake;
