@@ -159,11 +159,11 @@ pub const TorrentFile = struct {
 
         defer self.allocator.free(full_path);
         const cwd = std.fs.cwd();
-        const file = try cwd.createFile(full_path, .{ .lock = .Exclusive });
+        var file = try cwd.createFile(full_path, .{ .lock = .Exclusive });
         defer file.close();
 
         // This is blocking
-        try torrent.download(self.allocator, file.outStream());
+        try torrent.download(self.allocator, &file);
     }
 
     /// calls the trackerURL to retrieve a list of peers and our interval
@@ -200,7 +200,7 @@ pub const TorrentFile = struct {
         var bencode = Bencode.init(allocator);
         const torrent = try bencode.unmarshal(TorrentMeta, buffer);
         errdefer allocator.free(buffer);
-        //TODO Remove this when we implement seeding. For now free its memory to silence errors
+        //TODO Remove this when we implement http seeds. For now free its memory to silence errors
         allocator.free(torrent.httpseeds);
 
         var torrent_file = try torrent.file(allocator);
@@ -214,7 +214,7 @@ fn generatePeerId() ![20]u8 {
     // full peer_id
     var peer_id: [20]u8 = undefined;
     // our app name which will always remain the same
-    const app_name = "RAMEN";
+    const app_name = "-RM0010-";
     std.mem.copy(u8, &peer_id, app_name);
 
     // generate a random seed
@@ -222,11 +222,13 @@ fn generatePeerId() ![20]u8 {
     try std.crypto.randomBytes(&buf);
     const seed = std.mem.readIntLittle(u64, &buf);
 
+    const lookup = "0123456789abcdefghijklmnopqrstuvwxyz";
+
     // generate next bytes
-    var bytes: [15]u8 = undefined;
+    var bytes: [12]u8 = undefined;
     var r = std.rand.DefaultPrng.init(seed);
     for (peer_id[app_name.len..]) |*b| {
-        b.* = 'a';
+        b.* = lookup[r.random.intRangeAtMost(u8, 0, lookup.len - 1)];
     }
 
     return peer_id;

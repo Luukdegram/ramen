@@ -73,7 +73,7 @@ test "Deserialize handshake" {
     const data = try hs.serialize(testing.allocator);
     defer testing.allocator.free(data);
     const stream = std.io.fixedBufferStream(data).inStream();
-    var buffer = try testing.allocator.alloc(u8, 100);
+    var buffer = try testing.allocator.alloc(u8, 68);
     defer testing.allocator.free(buffer);
     var result = try Handshake.read(buffer, stream);
     testing.expectEqualSlices(u8, "BitTorrent protocol", result.p_str);

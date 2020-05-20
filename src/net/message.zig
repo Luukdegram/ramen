@@ -46,8 +46,8 @@ pub const Message = struct {
         if (begin > buffer.len) return error.IncorrectOffset;
 
         const data = self.payload[8..];
-        if (data.len > buffer.len) return error.OutOfMemory;
-        std.mem.copy(u8, buffer[begin..], data);
+        if (begin + data.len > buffer.len) return error.OutOfMemory;
+        std.mem.copy(u8, buffer[begin .. begin + data.len], data);
         return data.len;
     }
 

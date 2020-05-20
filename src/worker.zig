@@ -13,6 +13,10 @@ pub const WorkerContext = struct {
     worker: *Worker,
 };
 
+fn compare(a: Work, b: Work) bool {
+    return true;
+}
+
 /// Worker that manages jobs
 pub const Worker = struct {
     const Self = @This();
@@ -21,6 +25,8 @@ pub const Worker = struct {
     torrent: *const Torrent,
     workers: usize,
     allocator: *Allocator,
+    downloaded: usize = 0,
+    finished: *std.PriorityQueue(Work),
 
     /// Creates a new worker for the given work
     pub fn init(
@@ -28,6 +34,7 @@ pub const Worker = struct {
         mutex: *std.Mutex,
         torrent: *const Torrent,
         work: *std.PriorityQueue(Work),
+        finished: *std.PriorityQueue(Work),
     ) Self {
         return Self{
             .mutex = mutex,
@@ -35,10 +42,12 @@ pub const Worker = struct {
             .torrent = torrent,
             .workers = torrent.peers.len,
             .allocator = allocator,
+            .finished = finished,
         };
     }
 
-    /// Returns a Client for a worker, returns null if no empty spots are left.
+    /// Returns a Client for a worker, returns null if all peers have a client.
+    /// TODO, implement a way to get back client slots when a (unexpected) disconnect happends
     pub fn getClient(self: *Self) ?Client {
         const lock = self.mutex.acquire();
         defer lock.release();
@@ -62,6 +71,36 @@ pub const Worker = struct {
         const lock = self.mutex.acquire();
         defer lock.release();
         return self.work.removeOrNull();
+    }
+
+    /// Adds a piece of work that finished downloading to queue for stream writing.
+    pub fn done(self: *Self, work: Work) !void {
+        const lock = self.mutex.acquire();
+        defer lock.release();
+        try self.finished.add(work);
+    }
+
+    /// Starts the worker and writes the worker's pieces to the given stream.
+    /// TODO exit or retry if no clients are connected anymore, regardless of current progress
+    pub fn start(
+        self: *Self,
+        file: *std.fs.File,
+    ) !void {
+        while (true) {
+            const lock = self.mutex.acquire();
+            defer lock.release();
+            if (self.finished.removeOrNull()) |*work| {
+                const w = work.*;
+                const size = try file.pwrite(w.buffer, w.index * w.size);
+                self.downloaded += size;
+                std.debug.warn("\rDownloaded {Bi}", .{self.downloaded});
+                work.deinit();
+            }
+
+            if (self.downloaded == self.torrent.file.size) {
+                break;
+            }
+        }
     }
 };
 
@@ -91,11 +130,13 @@ pub const Work = struct {
         };
     }
 
-    /// Downloads work into its buffer
+    /// Creates a buffer with the size of the work piece,
+    /// then downloads the smaller pieces and puts them inside the buffer
     pub fn download(self: *Self, client: *Client) !void {
         var downloaded: usize = 0;
         var requested: usize = 0;
         var backlog: usize = 0;
+        self.buffer = try self.allocator.alloc(u8, self.size);
 
         // request to the peer for more bytes
         while (downloaded < self.size) {
@@ -120,7 +161,6 @@ pub const Work = struct {
                         }
                     },
                     .Piece => {
-                        self.buffer = try self.allocator.alloc(u8, self.size);
                         const size = try message.parsePiece(self.buffer, self.index);
                         downloaded += size;
                         backlog -= 1;
@@ -131,8 +171,9 @@ pub const Work = struct {
         }
     }
 
-    pub fn deinit(self: Self) void {
+    pub fn deinit(self: *Self) void {
         self.allocator.free(self.buffer);
+        self.* = undefined;
     }
 
     /// Checks the integrity of the data by checking its hash against the work's hash.

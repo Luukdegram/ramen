@@ -26,42 +26,41 @@ pub const Torrent = struct {
     pub fn download(
         self: Self,
         allocator: *std.mem.Allocator,
-        stream: var,
+        file: *std.fs.File,
     ) !void {
         std.debug.warn("Download started for torrent: {}\n", .{self.file.name});
 
         var queue = std.PriorityQueue(Work).init(allocator, compare);
+        var finished_queue = std.PriorityQueue(Work).init(allocator, compare);
+        defer queue.deinit();
+        defer finished_queue.deinit();
 
         // Creates jobs for all pieces that needs to be downloaded
-        var jobs = try allocator.alloc(Work, self.file.piece_hashes.len);
-        for (jobs) |*job, i| {
-            job.* = Work.init(i, self.file.piece_hashes[i], self.pieceSize(i), allocator);
-            try queue.add(job.*);
+        for (self.file.piece_hashes) |hash, i| {
+            var work = Work.init(i, hash, self.pieceSize(i), allocator);
+            try queue.add(work);
         }
-        defer allocator.free(jobs);
-
-        //try queue.addSlice(jobs);
 
         var mutex = std.Mutex.init();
         defer mutex.deinit();
 
-        var worker = Worker.init(allocator, &mutex, &self, &queue);
+        var worker = Worker.init(allocator, &mutex, &self, &queue, &finished_queue);
 
         var context = WorkerContext{
             .worker = &worker,
         };
 
-        var threads = try allocator.alloc(*std.Thread, 3);
+        var threads = try allocator.alloc(*std.Thread, 10);
         for (threads) |*t| {
             t.* = try std.Thread.spawn(&context, downloadWork);
         }
 
-        for (threads) |t| {
-            t.wait();
-        }
+        worker.start(file) catch {
+            std.debug.warn("Download got interrupted\n", .{});
+            return;
+        };
 
-        //clear memory
-        queue.deinit();
+        std.debug.warn("Finished downloading torrent\n", .{});
     }
 
     /// Returns the bounds of a piece by its index
@@ -95,13 +94,13 @@ pub const Torrent = struct {
 fn downloadWork(ctx: *WorkerContext) !void {
     var worker = ctx.worker;
     if (worker.getClient()) |*client| {
-        std.debug.warn("Attempt to connect to peer {}\n", .{client.peer.ip});
+        std.debug.warn("Attempt to connect to peer {}", .{client.peer.ip});
         client.connect() catch |err| {
-            std.debug.warn("Could not connect to peer {} - err: {}\n", .{ client.peer.ip, err });
+            std.debug.warn("\nCould not connect to peer {} - err: {}\n", .{ client.peer.ip, err });
             return;
         };
         defer client.close();
-        std.debug.warn("Connected to peer {}\n", .{client.peer.ip});
+        std.debug.warn("\nConnected to peer {}", .{client.peer.ip});
 
         try client.send(MessageType.Unchoke);
         try client.send(MessageType.Interested);
@@ -123,16 +122,15 @@ fn downloadWork(ctx: *WorkerContext) !void {
             };
 
             // sumcheck of its content, we don't want corrupt/incorrect data
-            // if (!work.eqlHash()) {
-            //     std.debug.warn("Failed checksum hash for piece {}\n", .{work.index});
-            //     try worker.put(work.*);
-            //     continue;
-            // }
+            if (!work.eqlHash()) {
+                try worker.put(work.*);
+                continue;
+            }
 
             // notify the peer we have the piece
             try client.sendHave(work.index);
-            std.debug.warn("------------\n{} -------------- {} \n", .{ (work.index + 1) * work.size, worker.torrent.file.size });
-            std.debug.warn("Downloaded: {}%\n", .{((work.index + 1) * work.size / worker.torrent.file.size) * 100});
+            try worker.done(work.*);
+            work.deinit();
         }
     }
 }

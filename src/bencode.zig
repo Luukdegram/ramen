@@ -56,7 +56,9 @@ pub const Bencode = struct {
                 '\n' => self.cursor += 1,
                 // defines string length
                 '0'...'9' => {
+                    std.debug.warn("BUFFER: {}\n", .{self.buffer[self.cursor .. self.cursor + 10]});
                     const str = try self.decodeString();
+                    std.debug.warn("STRING: {}\n", .{str});
                     try builder.set(str, self.allocator);
                 },
                 // directory -> new struct
@@ -273,7 +275,6 @@ fn Builder(comptime T: type) type {
                                     if (@TypeOf(@field(self.val, field.name)) == @TypeOf(str)) {
                                         @field(self.val, field.name) = str;
                                     }
-                                    self.state = .SetField;
                                 }
                             }
                         },
@@ -282,7 +283,7 @@ fn Builder(comptime T: type) type {
                             return error.UnsupportedType;
                         },
                     }
-                    // loop through fields so we can get the correct fieldname
+                    self.state = .SetField;
                 },
                 else => {
                     // Only set a field when the input is of type []const u8
