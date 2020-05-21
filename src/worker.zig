@@ -20,21 +20,29 @@ fn compare(a: Work, b: Work) bool {
 /// Worker that manages jobs
 pub const Worker = struct {
     const Self = @This();
+    /// mutex used to lock and unlock this `Worker` for multi-threading support
     mutex: *std.Mutex,
-    work: *std.PriorityQueue(Work),
+    /// Priority based queue that contains our pieces that need to be downloaded
+    /// we probably want to replace this with a regular queue as the priority does not matter
+    work: *std.ArrayList(Work),
+    /// Constant Torrent reference, purely for access to its data
     torrent: *const Torrent,
+    /// Remaining worker slots left based on peers
     workers: usize,
+    /// allocator used for the workers to allocate and free memory
     allocator: *Allocator,
+    /// the total size that has been downloaded so far
     downloaded: usize = 0,
-    finished: *std.PriorityQueue(Work),
+    /// The file we write to
+    file: *std.fs.File,
 
     /// Creates a new worker for the given work
     pub fn init(
         allocator: *Allocator,
         mutex: *std.Mutex,
         torrent: *const Torrent,
-        work: *std.PriorityQueue(Work),
-        finished: *std.PriorityQueue(Work),
+        work: *std.ArrayList(Work),
+        file: *std.fs.File,
     ) Self {
         return Self{
             .mutex = mutex,
@@ -42,7 +50,7 @@ pub const Worker = struct {
             .torrent = torrent,
             .workers = torrent.peers.len,
             .allocator = allocator,
-            .finished = finished,
+            .file = file,
         };
     }
 
@@ -63,44 +71,29 @@ pub const Worker = struct {
     pub fn put(self: *Self, work: Work) !void {
         const lock = self.mutex.acquire();
         defer lock.release();
-        try self.work.add(work);
+        try self.work.append(work);
     }
 
     /// Returns next job from queue, returns null if no work left.
     pub fn next(self: *Self) ?Work {
         const lock = self.mutex.acquire();
         defer lock.release();
-        return self.work.removeOrNull();
+        return self.work.popOrNull();
     }
 
-    /// Adds a piece of work that finished downloading to queue for stream writing.
-    pub fn done(self: *Self, work: Work) !void {
+    /// Writes a piece of work to a file. This blocks access to the Worker.
+    /// This will also destroy the given `Work` piece.
+    pub fn write(self: *Self, work: *Work) !void {
         const lock = self.mutex.acquire();
         defer lock.release();
-        try self.finished.add(work);
-    }
-
-    /// Starts the worker and writes the worker's pieces to the given stream.
-    /// TODO exit or retry if no clients are connected anymore, regardless of current progress
-    pub fn start(
-        self: *Self,
-        file: *std.fs.File,
-    ) !void {
-        while (true) {
-            const lock = self.mutex.acquire();
-            defer lock.release();
-            if (self.finished.removeOrNull()) |*work| {
-                const w = work.*;
-                const size = try file.pwrite(w.buffer, w.index * w.size);
-                self.downloaded += size;
-                std.debug.warn("\rDownloaded {Bi}", .{self.downloaded});
-                work.deinit();
-            }
-
-            if (self.downloaded == self.torrent.file.size) {
-                break;
-            }
-        }
+        const size = try self.file.pwrite(work.buffer, work.index * work.size);
+        self.downloaded += size;
+        const completed = self.downloaded / self.torrent.file.size * 100;
+        std.debug.warn("\r{Bi:.2} \t {Bi:.2}", .{
+            self.downloaded,
+            self.torrent.file.size,
+        });
+        //work.deinit();
     }
 };
 
@@ -136,6 +129,7 @@ pub const Work = struct {
         var downloaded: usize = 0;
         var requested: usize = 0;
         var backlog: usize = 0;
+        // incase of an error, the thread function will take care of the memory
         self.buffer = try self.allocator.alloc(u8, self.size);
 
         // request to the peer for more bytes
@@ -166,6 +160,7 @@ pub const Work = struct {
                         backlog -= 1;
                     },
                     else => {
+                        std.debug.warn("Unsupported message type: {}\n", .{message.message_type});
                         //ignore this message as we only comply to the official specs without extensions for now
                     },
                 }
@@ -180,7 +175,7 @@ pub const Work = struct {
     }
 
     /// Checks the integrity of the data by checking its hash against the work's hash.
-    fn eqlHash(self: Self) bool {
+    pub fn eqlHash(self: Self) bool {
         var out: [20]u8 = undefined;
         Sha1.hash(self.buffer, &out);
         return std.mem.eql(u8, &self.hash, &out);

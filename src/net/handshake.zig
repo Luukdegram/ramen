@@ -43,7 +43,6 @@ pub const Handshake = struct {
         const size = try stream.read(buffer);
 
         const length = std.mem.readIntBig(u8, &buffer[0]);
-        std.debug.warn("Length: {}\n", .{length});
         if (length == 0 or length > 19) return error.BadHandshake;
 
         self.p_str = buffer[1 .. length + 1];

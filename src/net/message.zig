@@ -40,7 +40,10 @@ pub const Message = struct {
         if (self.payload.len < 8) return error.IncorrectPayload;
 
         const p_index = std.mem.readIntBig(u32, self.payload[0..4]);
-        if (p_index != @intCast(u32, index)) return error.IncorrectIndex;
+        if (p_index != @intCast(u32, index)) {
+            std.debug.warn("Incorrect index: {} - {}\n", .{ p_index, index });
+            return error.IncorrectIndex;
+        }
 
         const begin = std.mem.readIntBig(u32, self.payload[4..8]);
         if (begin > buffer.len) return error.IncorrectOffset;
@@ -72,18 +75,13 @@ pub const Message = struct {
         var buffer = try allocator.alloc(u8, 4);
         defer allocator.free(buffer);
 
-        const read_len = stream.readAll(buffer) catch {
-            return null;
-        };
+        const read_len = try stream.readAll(buffer);
 
         const length = std.mem.readIntBig(u32, buffer[0..4]);
         if (length == 0) return null; // keep-alive
         var payload = try allocator.alloc(u8, length);
         errdefer allocator.free(payload);
-        const payload_size = stream.readAll(payload) catch {
-            allocator.free(payload);
-            return null;
-        };
+        const payload_size = try stream.readAll(payload);
 
         return Self{ .message_type = @intToEnum(MessageType, payload[0]), .payload = payload[1..] };
     }

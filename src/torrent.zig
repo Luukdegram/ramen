@@ -8,11 +8,6 @@ const WorkerContext = @import("worker.zig").WorkerContext;
 const MessageType = @import("net/message.zig").MessageType;
 const Client = @import("net/tcp_client.zig").TcpClient;
 
-/// determines the position in the queue
-fn compare(a: Work, b: Work) bool {
-    return a.index < b.index;
-}
-
 pub const Torrent = struct {
     const Self = @This();
     // peers is a list of seeders we can connect to
@@ -30,37 +25,36 @@ pub const Torrent = struct {
     ) !void {
         std.debug.warn("Download started for torrent: {}\n", .{self.file.name});
 
-        var queue = std.PriorityQueue(Work).init(allocator, compare);
-        var finished_queue = std.PriorityQueue(Work).init(allocator, compare);
+        var queue = std.ArrayList(Work).init(allocator);
         defer queue.deinit();
-        defer finished_queue.deinit();
 
         // Creates jobs for all pieces that needs to be downloaded
         for (self.file.piece_hashes) |hash, i| {
             var work = Work.init(i, hash, self.pieceSize(i), allocator);
-            try queue.add(work);
+            try queue.append(work);
         }
 
         var mutex = std.Mutex.init();
         defer mutex.deinit();
 
-        var worker = Worker.init(allocator, &mutex, &self, &queue, &finished_queue);
+        var worker = Worker.init(allocator, &mutex, &self, &queue, file);
 
         var context = WorkerContext{
             .worker = &worker,
         };
 
-        var threads = try allocator.alloc(*std.Thread, 10);
+        std.debug.warn("Peer size: {}\n", .{self.peers.len});
+        var threads = try allocator.alloc(*std.Thread, 12);
         for (threads) |*t| {
             t.* = try std.Thread.spawn(&context, downloadWork);
         }
 
-        worker.start(file) catch {
-            std.debug.warn("Download got interrupted\n", .{});
-            return;
-        };
+        std.debug.warn("Downloaded\tSize\t% completed\n", .{});
+        for (threads) |t| {
+            t.wait();
+        }
 
-        std.debug.warn("Finished downloading torrent\n", .{});
+        std.debug.warn("\nFinished downloading torrent", .{});
     }
 
     /// Returns the bounds of a piece by its index
@@ -94,13 +88,10 @@ pub const Torrent = struct {
 fn downloadWork(ctx: *WorkerContext) !void {
     var worker = ctx.worker;
     if (worker.getClient()) |*client| {
-        std.debug.warn("Attempt to connect to peer {}\n", .{client.peer.ip});
         client.connect() catch |err| {
-            std.debug.warn("Could not connect to peer {} - err: {}\n", .{ client.peer.ip, err });
             return;
         };
         defer client.close();
-        std.debug.warn("Connected to peer {}\n", .{client.peer.ip});
 
         try client.send(MessageType.Unchoke);
         try client.send(MessageType.Interested);
@@ -118,9 +109,10 @@ fn downloadWork(ctx: *WorkerContext) !void {
             }
 
             // download the piece of work
-            work.download(client) catch {
+            work.download(client) catch |err| {
                 try worker.put(work.*);
-                return;
+                std.debug.warn("Couldn't download piece: {}\n", .{err});
+                continue;
             };
 
             // sumcheck of its content, we don't want corrupt/incorrect data
@@ -131,7 +123,7 @@ fn downloadWork(ctx: *WorkerContext) !void {
 
             // notify the peer we have the piece
             try client.sendHave(work.index);
-            try worker.done(work.*);
+            try worker.write(work);
         }
     }
 }
