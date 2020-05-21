@@ -56,9 +56,7 @@ pub const Bencode = struct {
                 '\n' => self.cursor += 1,
                 // defines string length
                 '0'...'9' => {
-                    std.debug.warn("BUFFER: {}\n", .{self.buffer[self.cursor .. self.cursor + 10]});
                     const str = try self.decodeString();
-                    std.debug.warn("STRING: {}\n", .{str});
                     try builder.set(str, self.allocator);
                 },
                 // directory -> new struct
@@ -186,11 +184,11 @@ pub const Bencode = struct {
 
     // decodes the next integer found before the color (:) symbol
     fn decodeInt(self: *Self) !usize {
-        const index = std.mem.indexOf(u8, self.buffer[self.cursor..], ":") orelse 0;
+        const index = std.mem.indexOf(u8, self.buffer[self.cursor..], ":") orelse return error.UnexpectedCharacter;
         const int = self.buffer[self.cursor .. self.cursor + index];
         self.cursor += index + 1;
 
-        return try std.fmt.parseInt(usize, int, 10);
+        return std.fmt.parseInt(usize, int, 10);
     }
 
     fn parseList(self: *Self) ![]const []const u8 {
@@ -202,19 +200,6 @@ pub const Bencode = struct {
         return list.toOwnedSlice();
     }
 };
-
-/// calculates the length of an integer
-/// i.e. the length of the number 502 is 3.
-fn intLength(val: usize) usize {
-    if (val <= 0) return 0;
-
-    var tmp: usize = val;
-    var i: usize = 1;
-    while (tmp > 9) : (i += 1) {
-        tmp /= 10;
-    }
-    return i;
-}
 
 /// Builder is a helper struct that set the fields on the given Type
 /// based on the input given.

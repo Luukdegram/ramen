@@ -72,7 +72,7 @@ pub const Message = struct {
         var buffer = try allocator.alloc(u8, 4);
         defer allocator.free(buffer);
 
-        const read_len = stream.read(buffer) catch {
+        const read_len = stream.readAll(buffer) catch {
             return null;
         };
 

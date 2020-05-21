@@ -94,19 +94,21 @@ pub const Torrent = struct {
 fn downloadWork(ctx: *WorkerContext) !void {
     var worker = ctx.worker;
     if (worker.getClient()) |*client| {
-        std.debug.warn("Attempt to connect to peer {}", .{client.peer.ip});
+        std.debug.warn("Attempt to connect to peer {}\n", .{client.peer.ip});
         client.connect() catch |err| {
-            std.debug.warn("\nCould not connect to peer {} - err: {}\n", .{ client.peer.ip, err });
+            std.debug.warn("Could not connect to peer {} - err: {}\n", .{ client.peer.ip, err });
             return;
         };
         defer client.close();
-        std.debug.warn("\nConnected to peer {}", .{client.peer.ip});
+        std.debug.warn("Connected to peer {}\n", .{client.peer.ip});
 
         try client.send(MessageType.Unchoke);
         try client.send(MessageType.Interested);
 
         // our work loop, try to download all pieces of work
         while (worker.next()) |*work| {
+            // work is copied by value, so deinit the current object when leaving this function
+            defer work.deinit();
             // if the peer does not have the piece, skip and put the piece back in the queue
             if (client.bitfield) |bitfield| {
                 if (!bitfield.hasPiece(work.index)) {
@@ -130,7 +132,6 @@ fn downloadWork(ctx: *WorkerContext) !void {
             // notify the peer we have the piece
             try client.sendHave(work.index);
             try worker.done(work.*);
-            work.deinit();
         }
     }
 }

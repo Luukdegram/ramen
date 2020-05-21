@@ -104,7 +104,7 @@ pub const Worker = struct {
     }
 };
 
-/// A piece of work that needs to be done
+/// A piece of work that needs to be downloaded
 pub const Work = struct {
     const Self = @This();
     index: usize,
@@ -165,15 +165,18 @@ pub const Work = struct {
                         downloaded += size;
                         backlog -= 1;
                     },
-                    else => {},
+                    else => {
+                        //ignore this message as we only comply to the official specs without extensions for now
+                    },
                 }
             }
         }
     }
 
+    /// Frees the Work's memory
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.buffer);
-        self.* = undefined;
+        self.allocator.destroy(self);
     }
 
     /// Checks the integrity of the data by checking its hash against the work's hash.
