@@ -352,6 +352,6 @@ test "Encode struct to Bencode" {
     const result = try bencode.marshal(TestStruct, value, buffer);
     defer testing.allocator.free(buffer);
 
-    const expected = "d4:name12:random value6:length4:i1236ed5:field11:other valueee";
+    const expected = "d4:name12:random value6:lengthi1236ed5:field11:other valueee";
     testing.expectEqualSlices(u8, expected, buffer[0..result]);
 }

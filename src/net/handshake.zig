@@ -43,9 +43,10 @@ pub const Handshake = struct {
         const size = try stream.read(buffer);
 
         const length = std.mem.readIntBig(u8, &buffer[0]);
+        std.debug.warn("Length: {}\n", .{length});
         if (length == 0 or length > 19) return error.BadHandshake;
 
-        self.p_str = buffer[1..length];
+        self.p_str = buffer[1 .. length + 1];
         std.mem.copy(u8, &self.hash, buffer[length + 9 .. length + 29]);
         std.mem.copy(u8, &self.peer, buffer[length + 29 .. length + 49]);
 
@@ -54,9 +55,11 @@ pub const Handshake = struct {
 };
 
 test "Serialize handshake" {
+    var hash = [_]u8{0} ** 20;
+    var peer_id = [_]u8{0} ** 20;
     const hs = Handshake.init(
-        "12345678901234567890",
-        "12345678901234567890",
+        hash,
+        peer_id,
     );
 
     const result = try hs.serialize(testing.allocator);
@@ -65,9 +68,11 @@ test "Serialize handshake" {
 }
 
 test "Deserialize handshake" {
+    var hash = [_]u8{'a'} ** 20;
+    var peer_id = [_]u8{'a'} ** 20;
     const hs = Handshake.init(
-        "12345678901234567890",
-        "12345678901234567890",
+        hash,
+        peer_id,
     );
 
     const data = try hs.serialize(testing.allocator);
