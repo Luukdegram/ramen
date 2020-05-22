@@ -4,8 +4,9 @@ const Allocator = std.mem.Allocator;
 const Peer = @import("peer.zig").Peer;
 const Torrent = @import("torrent.zig").Torrent;
 const Client = @import("net/tcp_client.zig").TcpClient;
+const MessageType = @import("net/message.zig").MessageType;
 
-const max_items = 5;
+const max_items = 10;
 const max_block_size = 16384;
 
 /// Context passed to the working threads
@@ -89,11 +90,10 @@ pub const Worker = struct {
         const size = try self.file.pwrite(work.buffer, work.index * work.size);
         self.downloaded += size;
         const completed = self.downloaded / self.torrent.file.size * 100;
-        std.debug.warn("\r{Bi:.2} \t {Bi:.2}", .{
+        std.debug.warn("\r{Bi:.2} \t\t{Bi:.2}", .{
             self.downloaded,
             self.torrent.file.size,
         });
-        //work.deinit();
     }
 };
 
@@ -145,6 +145,7 @@ pub const Work = struct {
 
             // read the message we received, this is blocking
             if (try client.read()) |message| {
+                defer self.allocator.free(message.payload);
                 switch (message.message_type) {
                     .Choke => client.choked = true,
                     .Unchoke => client.choked = false,
@@ -161,7 +162,7 @@ pub const Work = struct {
                     },
                     else => {
                         std.debug.warn("Unsupported message type: {}\n", .{message.message_type});
-                        //ignore this message as we only comply to the official specs without extensions for now
+                        return error.IncorrectMessageType;
                     },
                 }
             }
@@ -171,7 +172,8 @@ pub const Work = struct {
     /// Frees the Work's memory
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.buffer);
-        self.allocator.destroy(self);
+        self.allocator.free(&self.hash);
+        self.* = undefined;
     }
 
     /// Checks the integrity of the data by checking its hash against the work's hash.

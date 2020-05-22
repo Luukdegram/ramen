@@ -122,9 +122,11 @@ pub const TcpClient = struct {
     }
 
     /// Closes the connection
-    pub fn close(self: Self) void {
+    pub fn close(self: *Self) void {
         self.socket.close();
         self.allocator.free(self.peer.ip);
+        self.allocator.free(self.bitfield.?.buffer);
+        self.* = undefined;
     }
 
     /// Initiates a handshake between the peer and us.

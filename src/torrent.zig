@@ -49,7 +49,7 @@ pub const Torrent = struct {
             t.* = try std.Thread.spawn(&context, downloadWork);
         }
 
-        std.debug.warn("Downloaded\tSize\t% completed\n", .{});
+        std.debug.warn("Downloaded\t\tSize\t\t% completed\n", .{});
         for (threads) |t| {
             t.wait();
         }
@@ -112,7 +112,14 @@ fn downloadWork(ctx: *WorkerContext) !void {
             work.download(client) catch |err| {
                 try worker.put(work.*);
                 std.debug.warn("Couldn't download piece: {}\n", .{err});
-                continue;
+                switch (err) {
+                    // Unsupported peer, disconnect
+                    error.IncorrectMessageType => return,
+                    // peer slams the door and disconnects
+                    error.ConnectionResetByPeer => return,
+                    // in other cases, skip this work piece and try again
+                    else => continue,
+                }
             };
 
             // sumcheck of its content, we don't want corrupt/incorrect data

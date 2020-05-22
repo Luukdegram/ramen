@@ -50,7 +50,7 @@ pub const Message = struct {
 
         const data = self.payload[8..];
         if (begin + data.len > buffer.len) return error.OutOfMemory;
-        std.mem.copy(u8, buffer[begin .. begin + data.len], data);
+        std.mem.copy(u8, buffer[begin..], data);
         return data.len;
     }
 
@@ -72,16 +72,17 @@ pub const Message = struct {
             std.fs.File.read,
         ),
     ) !?Self {
+        // find length of payload
         var buffer = try allocator.alloc(u8, 4);
         defer allocator.free(buffer);
+        _ = try stream.read(buffer);
 
-        const read_len = try stream.readAll(buffer);
-
-        const length = std.mem.readIntBig(u32, buffer[0..4]);
+        const length = std.mem.readIntBig(u32, &buffer[0..4]);
         if (length == 0) return null; // keep-alive
+
         var payload = try allocator.alloc(u8, length);
         errdefer allocator.free(payload);
-        const payload_size = try stream.readAll(payload);
+        _ = try stream.readAll(payload);
 
         return Self{ .message_type = @intToEnum(MessageType, payload[0]), .payload = payload[1..] };
     }

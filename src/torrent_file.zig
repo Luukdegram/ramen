@@ -6,7 +6,7 @@ const peer = @import("peer.zig");
 const Bencode = @import("bencode.zig").Bencode;
 const Torrent = @import("torrent.zig").Torrent;
 
-/// Our port we connect from
+/// Our port we will seed from when we implement seeding
 /// Default based on 'BEP 3': http://bittorrent.org/beps/bep_0003.html
 const local_port: u16 = 6881;
 
