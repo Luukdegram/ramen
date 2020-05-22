@@ -77,7 +77,7 @@ pub const Message = struct {
         defer allocator.free(buffer);
         _ = try stream.read(buffer);
 
-        const length = std.mem.readIntBig(u32, &buffer[0..4]);
+        const length = std.mem.readIntBig(u32, buffer[0..4]);
         if (length == 0) return null; // keep-alive
 
         var payload = try allocator.alloc(u8, length);

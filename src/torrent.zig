@@ -44,7 +44,7 @@ pub const Torrent = struct {
         };
 
         std.debug.warn("Peer size: {}\n", .{self.peers.len});
-        var threads = try allocator.alloc(*std.Thread, 12);
+        var threads = try allocator.alloc(*std.Thread, self.peers.len);
         for (threads) |*t| {
             t.* = try std.Thread.spawn(&context, downloadWork);
         }

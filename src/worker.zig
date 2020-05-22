@@ -6,7 +6,7 @@ const Torrent = @import("torrent.zig").Torrent;
 const Client = @import("net/tcp_client.zig").TcpClient;
 const MessageType = @import("net/message.zig").MessageType;
 
-const max_items = 10;
+const max_items = 5;
 const max_block_size = 16384;
 
 /// Context passed to the working threads
@@ -172,7 +172,6 @@ pub const Work = struct {
     /// Frees the Work's memory
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.buffer);
-        self.allocator.free(&self.hash);
         self.* = undefined;
     }
 

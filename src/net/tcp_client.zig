@@ -125,7 +125,6 @@ pub const TcpClient = struct {
     pub fn close(self: *Self) void {
         self.socket.close();
         self.allocator.free(self.peer.ip);
-        self.allocator.free(self.bitfield.?.buffer);
         self.* = undefined;
     }
 

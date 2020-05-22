@@ -134,7 +134,6 @@ pub const TorrentFile = struct {
     }
 
     pub fn deinit(self: Self) void {
-        self.allocator.free(&self.hash);
         self.allocator.free(self.piece_hashes);
         self.allocator.free(self.buffer);
     }
