@@ -11,9 +11,12 @@ pub const Url = struct {
     pub fn init(url: []const u8) !Url {
         var tmp = url;
 
+        var scheme: []const u8 = "http";
+
         if (std.mem.eql(u8, url[0..7], "http://")) {
             tmp = url[7..];
         } else if (std.mem.eql(u8, url[0..8], "https://")) {
+            scheme = "https";
             tmp = url[8..];
         }
 
@@ -23,6 +26,7 @@ pub const Url = struct {
 
         for (tmp) |c, i| {
             if (c == ':') {
+                // TODO add support for URL's that do not end with a forward slash
                 const index = std.mem.indexOf(u8, tmp[i..], "/") orelse unreachable;
                 port = try std.fmt.parseInt(u16, tmp[i + 1 .. i + index], 10);
                 host = tmp[0..i];
@@ -38,7 +42,7 @@ pub const Url = struct {
 
         // for now we only support HTTP
         return Url{
-            .protocol = "http",
+            .protocol = scheme,
             .host = host,
             .path = path,
             .port = port,
