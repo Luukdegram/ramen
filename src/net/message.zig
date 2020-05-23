@@ -80,11 +80,19 @@ pub const Message = struct {
         const length = std.mem.readIntBig(u32, buffer[0..4]);
         if (length == 0) return null; // keep-alive
 
-        var payload = try allocator.alloc(u8, length);
+        var type_buffer = try allocator.alloc(u8, 1);
+        defer allocator.free(type_buffer);
+        _ = try stream.read(type_buffer);
+
+        // for now only accept the official message ID's until we implement more
+        const message_type = std.mem.readIntBig(u8, type_buffer[0..1]);
+        if (message_type > 8) return null;
+
+        var payload = try allocator.alloc(u8, length - 1);
         errdefer allocator.free(payload);
         _ = try stream.readAll(payload);
 
-        return Self{ .message_type = @intToEnum(MessageType, payload[0]), .payload = payload[1..] };
+        return Self{ .message_type = @intToEnum(MessageType, message_type), .payload = payload };
     }
 
     /// Serializes a message into the given buffer with the following format
