@@ -35,7 +35,7 @@ pub const Handshake = struct {
     /// Must be freed after use.
     pub fn read(
         buffer: []u8,
-        stream: var,
+        stream: anytype,
     ) !Handshake {
         if (buffer.len != 68) return error.IncorrectBufferSize;
         var i: usize = 20;

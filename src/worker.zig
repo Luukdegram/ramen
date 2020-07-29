@@ -171,6 +171,7 @@ pub const Work = struct {
 
     /// Frees the Work's memory
     pub fn deinit(self: *Self) void {
+        //TODO self.buffer can be undefined
         self.allocator.free(self.buffer);
         self.* = undefined;
     }

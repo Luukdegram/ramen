@@ -33,7 +33,7 @@ pub const Bencode = struct {
     pub fn marshal(
         self: *Self,
         comptime T: type,
-        value: var,
+        value: anytype,
         buffer: []u8,
     ) !usize {
         self.cursor = 0;
@@ -125,7 +125,7 @@ pub const Bencode = struct {
     fn encode(
         self: *Self,
         comptime T: type,
-        value: var,
+        value: anytype,
         buffer: []u8,
     ) !usize {
         std.mem.copy(u8, buffer[self.cursor..], "d");
@@ -237,7 +237,7 @@ fn Builder(comptime T: type) type {
 
         fn set(
             self: *Self,
-            str: var,
+            str: anytype,
             allocator: *std.mem.Allocator,
         ) !void {
             switch (self.state) {
