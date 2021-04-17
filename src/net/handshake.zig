@@ -1,57 +1,51 @@
 const std = @import("std");
 const testing = std.testing;
 
-/// Handshake identifies the connection between us and the peers
-pub const Handshake = struct {
-    p_str: []const u8 = "BitTorrent protocol",
-    hash: [20]u8,
-    peer: [20]u8,
+const Handshake = @This();
 
-    /// Creates a new Handshake instance
-    pub fn init(hash: [20]u8, peer_id: [20]u8) Handshake {
-        return .{
-            .hash = hash,
-            .peer = peer_id,
-        };
-    }
+hash: [20]u8,
+peer_id: [20]u8,
 
-    /// Serializes a Handshake object into binary data
-    /// Must be freed after use
-    pub fn serialize(self: @This(), allocator: *std.mem.Allocator) ![]u8 {
-        if (self.p_str.len > 19) return error.OutOfMemory;
+const p_str = "BitTorrent protocol";
+const p_strlen = @intCast(u8, p_str.len);
 
-        var buffer: []u8 = try allocator.alloc(u8, self.p_str.len + 49);
-        buffer[0] = @intCast(u8, self.p_str.len);
-        std.mem.copy(u8, buffer[1..], self.p_str);
-        var i: usize = self.p_str.len + 8 + 1; // 8 reserved bytes
-        std.mem.copy(u8, buffer[i..], &self.hash);
-        i += self.hash.len;
-        std.mem.copy(u8, buffer[i..], &self.peer);
-        i += self.peer.len;
-        return buffer[0..i];
-    }
+/// Serializes a Handshake object into binary data
+/// TODO: Should we accept a writer?
+pub fn serialize(self: Handshake) []const u8 {
+    var buffer: [p_strlen + 49]u8 = undefined;
+    buffer[0] = @intCast(u8, p_strlen);
+    std.mem.copy(u8, buffer[1..], self.p_str);
+    const index = p_strlen + 8 + 1; // 8 reserved bytes
+    std.mem.copy(u8, buffer[index..], &self.hash);
+    std.mem.copy(u8, buffer[index + 20 ..], &self.peer);
+    return &buffer;
+}
 
-    /// Reads from the `io.InStream` and parses the binary data into a `Handshake`
-    /// Must be freed after use.
-    pub fn read(
-        buffer: []u8,
-        stream: anytype,
-    ) !Handshake {
-        if (buffer.len != 68) return error.IncorrectBufferSize;
-        var i: usize = 20;
-        var self: Handshake = undefined;
-        const size = try stream.read(buffer);
-
-        const length = std.mem.readIntBig(u8, &buffer[0]);
-        if (length == 0 or length > 19) return error.BadHandshake;
-
-        self.p_str = buffer[1 .. length + 1];
-        std.mem.copy(u8, &self.hash, buffer[length + 9 .. length + 29]);
-        std.mem.copy(u8, &self.peer, buffer[length + 29 .. length + 49]);
-
-        return self;
-    }
+pub const DeserializeError = error{
+    /// Connection was closed by peer
+    EndOfStream,
+    /// Peer's p_strlen is invalid
+    BadHandshake,
 };
+
+/// Deserializes from an `io.Reader` and parses the binary data into a `Handshake`
+/// Asserts `buffer` has a 'len' of atleast p_strlen + 49 bytes
+pub fn deserialize(
+    buffer: []u8,
+    reader: anytype,
+) (DeserializeError || @TypeOf(reader).Error)!Handshake {
+    std.debug.assert(buffer.len >= p_strlen + 49);
+    const size = try stream.read(buffer);
+    if (size == 0) return error.EndOfStream;
+
+    const length = std.mem.readIntBig(u8, &buffer[0]);
+    if (length != 19) return error.BadHandshake;
+
+    return Handshake{
+        .hash = buffer[length + 9 .. length + 29],
+        .peer_id = buffer[length + 29 .. length + 49],
+    };
+}
 
 test "Serialize handshake" {
     var hash = [_]u8{0} ** 20;

@@ -1,135 +1,174 @@
 const std = @import("std");
+const meta = std.meta;
+const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
-/// Reserved message IDs
-/// Currently, they only contain the Core Protocol IDs
-pub const MessageType = enum(u8) {
-    Choke,
-    Unchoke,
-    Interested,
-    NotInterested,
-    Have,
-    Bitfield,
-    Request,
-    Piece,
-    Cancel,
-    _,
-};
+/// All supported message types by the client
+/// any others will be skipped
+pub const Message = union(enum(u8)) {
+    /// Whether or not the remote peer has choked this client.
+    choke,
+    /// The remote peer has unchoked the client.
+    unchoke,
+    /// Notifies the peer we are interested in more data.
+    interested,
+    /// Notifies the peer we are no longer interested in data.
+    not_interested,
+    /// Contains the index of a piece the peer has.
+    have: u32,
+    /// Only sent in the very first message. Sent to peer
+    /// to tell which pieces have already been download.
+    /// This is used to resume a download from a later point.
+    bitfield: []const u8,
+    /// Tells the peer the index, begin and length of the data we are requesting.
+    request: Data,
+    /// Tells the peer the index, begin and piece which the client wants to receive.
+    piece: struct {
+        index: u32,
+        begin: u32,
+        block: Block,
+    },
+    /// Used to notify all-but-one peer to cancel data requests as the last piece is being received.
+    cancel: Data,
 
-/// Messages are sent and received between us and the peer
-/// Based on the message type we receive, we handle accordingly.
-pub const Message = struct {
-    const Self = @This();
+    /// `Block` is a slice of data, and is a subset of `Piece`.
+    pub const Block = []const u8;
 
-    message_type: MessageType,
-    payload: []u8,
+    /// `Data` specifies the index of the piece, the byte-offset within the piece
+    /// and the length of the data to be requested/cancelled
+    pub const Data = struct {
+        index: u32,
+        begin: u32,
+        length: u32,
+    };
 
-    /// Creates an empty message of the given type.
-    pub fn init(message_type: MessageType) Self {
-        return .{ .message_type = message_type, .payload = "" };
+    pub const DeserializeError = error{
+        /// Peer has closed the connection
+        EndOfStream,
+        /// Peer has sent an unsupported message type
+        /// such as notifying us of udp support.
+        Unsupported,
+        /// Machine is out of memory and no memory can be allocated
+        /// on the heap.
+        OutOfMemory,
+    };
+
+    fn toInt(self: Message) u8 {
+        return @enumToInt(self);
     }
 
-    /// Parses the payload of a `MessageType.Piece` into the given buffer
-    /// returns the length of payload's data.
-    pub fn parsePiece(
-        self: Self,
-        buffer: []u8,
-        index: usize,
-    ) !usize {
-        if (self.message_type != .Piece) return error.IncorrectMessageType;
+    /// Returns the serialization length of the given `Message`
+    fn serializeLen(self: Message) u32 {
+        return switch (self) {
+            .choke,
+            .unchoke,
+            .interested,
+            .not_interested,
+            => 0,
+            .have => 4,
+            .bitfield => @panic("TODO: bitfield serializeLen"),
+            .request, .cancel => 12,
+            .piece => |piece| 12 + piece.block.len,
+        };
+    }
 
-        if (self.payload.len < 8) return error.IncorrectPayload;
-
-        const p_index = std.mem.readIntBig(u32, self.payload[0..4]);
-        if (p_index != @intCast(u32, index)) {
-            std.debug.warn("Incorrect index: {} - {}\n", .{ p_index, index });
-            return error.IncorrectIndex;
+    /// Deinitializes the given `Message`.
+    /// The `Allocator` is only needed for messages that have a variable size such as `Message.piece`.
+    /// All other messages are a no-op.
+    pub fn deinit(self: *Message, gpa: *Allocator) void {
+        switch (self) {
+            .piece => |piece| gpa.free(piece.block),
+            else => {},
         }
-
-        const begin = std.mem.readIntBig(u32, self.payload[4..8]);
-        if (begin > buffer.len) return error.IncorrectOffset;
-
-        const data = self.payload[8..];
-        if (begin + data.len > buffer.len) return error.OutOfMemory;
-        std.mem.copy(u8, buffer[begin..], data);
-        return data.len;
+        self.* = undefined;
     }
 
-    /// Parses current `MessageType.Have` message and returns the index.
-    pub fn parseHave(self: Self) !usize {
-        if (self.message_type != .Have) return error.IncorrectMessageType;
+    /// Deserializes the current data into a `Message`. Uses the given `Allocator` when
+    /// the payload is dynamic. All other messages will use a fixed-size buffer for speed.
+    /// Returns `DeserializeError.Unsupported` when it tries to deserialize a message type that is
+    /// not supported by the library yet.
+    /// Returns `null` when peer has sent keep-alive
+    pub fn deserialize(gpa: *Allocator, reader: anytype) (DeserializeError || @TypeOf(reader))!?Message {
+        const length = try reader.readIntBig(u32);
+        if (length == 0) return null;
 
-        if (self.payload.len != 4) return error.IncorrectLength;
+        const type_byte = try reader.readByte();
+        const message_type = meta.intToEnum(meta.Tag(Message), type_byte) catch return error.Unsupported;
 
-        return std.mem.readIntBig(u32, self.payload[0..4]);
+        return switch (message_type) {
+            .choke => Message.choke,
+            .unchoke => Message.unchoke,
+            .interested => Message.interested,
+            .not_interested => Message.not_interested,
+            .have => try deserializeHave(reader),
+            .bitfield => try deserializeBitfield(gpa, length - 1, reader),
+            .request => try deserializeRequest(.request, reader),
+            .piece => try deserializePiece(gpa, length - 1, reader),
+            .cancel => try deserializeData(.cancel, reader),
+        };
     }
 
-    /// Reads from an `io.Instream` and parses its content into a Message.
-    pub fn read(
-        allocator: *std.mem.Allocator,
-        stream: std.io.InStream(
-            std.fs.File,
-            std.os.ReadError,
-            std.fs.File.read,
-        ),
-    ) !?Self {
-        // find length of payload
-        var buffer = try allocator.alloc(u8, 4);
-        defer allocator.free(buffer);
-        _ = try stream.read(buffer);
-
-        const length = std.mem.readIntBig(u32, buffer[0..4]);
-        if (length == 0) return null; // keep-alive
-
-        var type_buffer = try allocator.alloc(u8, 1);
-        defer allocator.free(type_buffer);
-        _ = try stream.read(type_buffer);
-
-        // for now only accept the official message ID's until we implement more
-        const message_type = std.mem.readIntBig(u8, type_buffer[0..1]);
-        if (message_type > 8) return null;
-
-        var payload = try allocator.alloc(u8, length - 1);
-        errdefer allocator.free(payload);
-        _ = try stream.readAll(payload);
-
-        return Self{ .message_type = @intToEnum(MessageType, message_type), .payload = payload };
+    /// Serializes the given `Message` and writes it to the given `writer`
+    pub fn serialize(self: Message, writer: anytype) @TypeOf(writer)!void {
+        const len = self.serializeLen() + 1; // 1 for the message type
+        try writer.writeByte(len);
+        try writer.writeByte(self.toInt());
+        switch (self) {
+            .choke,
+            unchoke,
+            interested,
+            not_interested,
+            => {},
+            .have => |index| try writer.writeIntBig(index),
+            .bitfield => @panic("TODO: Serialize bitfield"),
+            .request, .cancel => |data| {
+                try writer.writeIntBig(data.index);
+                try writer.writeIntBig(data.begin);
+                try writer.writeIntBig(data.length);
+            },
+            .piece => |piece| {
+                try writer.writeIntBig(piece.index);
+                try writer.writeIntBig(piece.begin);
+                try writer.writeAll(piece.block);
+            },
+        }
     }
 
-    /// Serializes a message into the given buffer with the following format
-    /// <length><message_type><payload>
-    pub fn serialize(self: Self, allocator: *std.mem.Allocator) ![]const u8 {
-        const length: u32 = @intCast(u32, self.payload.len) + 1; // type's length is 1 byte
-        var buffer = try allocator.alloc(u8, length + 4); // 4 for length
-
-        std.mem.writeIntBig(u32, buffer[0..4], length);
-        buffer[4] = @enumToInt(self.message_type);
-        std.mem.copy(u8, buffer[5..], self.payload);
-
-        return buffer;
+    /// Deserializes the given `reader` into a `Message.have`
+    fn deserializeHave(reader: anytype) @TypeOf(reader).Error!Message {
+        return Message{ .have = try reader.readIntBig(u32) };
     }
 
-    /// Creates a `Message` with the type Request
-    pub fn requestMessage(
-        allocator: *std.mem.Allocator,
-        index: usize,
-        begin: usize,
-        length: usize,
-    ) !Self {
-        var buffer = try allocator.alloc(u8, 12);
-
-        std.mem.writeIntBig(u32, buffer[0..4], @intCast(u32, index));
-        std.mem.writeIntBig(u32, buffer[4..8], @intCast(u32, begin));
-        std.mem.writeIntBig(u32, buffer[8..12], @intCast(u32, length));
-
-        return Self{ .message_type = .Request, .payload = buffer };
+    /// Deserializes the given `reader` into a `Message.bitfield`
+    /// As the length of the bitfield payload is variable, it requires an allocator
+    fn deserializeBitfield(gpa: *Allocator, length: u32, reader: anytype) @TypeOf(reader).Error!Message {
+        @panic("TODO: Implement deserializeBitfield");
     }
 
-    /// Creates a `Message` with the type Have
-    pub fn haveMessage(allocator: *std.mem.Allocator, index: usize) !Self {
-        var buffer = try allocator.alloc(u8, 4);
+    /// Deserializes a fixed-length payload into a `Message.Request`
+    fn deserializeData(kind: enum { request, cancel }, reader: anytype) @TypeOf(reader).Error!Message {
+        const data: Data = .{
+            .index = try reader.readIntBig(u32),
+            .begin = try reader.readIntBig(u32),
+            .length = try reader.readIntBig(u32),
+        };
+        return Message{switch (kind) {
+            .request => .request = data,
+            .cancel => .cancel = data,
+        }};
+    }
 
-        std.mem.writeIntBig(u32, buffer[0..4], @intCast(u32, index));
-
-        return Self{ .message_type = .Have, .payload = buffer };
+    /// Deserializes the current reader into `Message.piece`.
+    /// As the length of the payload is variable, it accepts a length and `Allocator`.
+    /// Note that it blocks on reading the payload until all is read.
+    fn deserializePiece(gpa: *Allocator, length: u32, reader: anytype) (DeserializeError || @TypeOf(reader).Error)!Message {
+        const block = try gpa.alloc(length);
+        return Message{
+            .piece = .{
+                .index = try reader.readIntBig(u32),
+                .begin = try reader.readIntBig(u32),
+                .block = try reader.readAll(block),
+            },
+        };
     }
 };
