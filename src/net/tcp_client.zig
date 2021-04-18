@@ -1,8 +1,8 @@
 const std = @import("std");
 const msg = @import("message.zig");
 
-const Peer = @import("../peer.zig").Peer;
-const Handshake = @import("handshake.zig").Handshake;
+const Peer = @import("../Peer.zig");
+const Handshake = @import("Handshake.zig");
 
 /// Client represents a connection between a peer and us
 pub const TcpClient = struct {

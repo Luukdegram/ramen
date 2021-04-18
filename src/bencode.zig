@@ -1,5 +1,98 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const meta = std.meta;
+const trait = meta.trait;
 const testing = std.testing;
+
+pub fn Deserializer(ReaderType: type) type {
+    return struct {
+        const Self = @This();
+        /// Reader that is being read from while deserializing
+        reader: ReaderType,
+        gpa: *Allocator,
+        /// Counter to what has been read so far
+        index: usize,
+        /// Last character that was read from the stream
+        last_char: u8,
+
+        pub const Error = ReaderType.Error || std.fmt.ParseIntError;
+
+        pub fn init(gpa: *Allocator, reader: ReaderType) Self {
+            return .{ .reader = reader, .gpa = gpa, .index = 0, .last_char = undefined };
+        }
+
+        /// Deserializes the current reader's stream into the given type `T`
+        /// Rather than supplier a buffer, it will allocate the data it has read
+        /// and can be freed upon calling `deinit` afterwards.
+        pub fn deserialize(self: *Self, comptime T: type) Error!T {
+            if (@typeInfo(T) != .Struct) @compileError("T must be a struct Type.");
+            var value: T = undefined;
+            try self.deserializeType(T, &value);
+            return value;
+        }
+
+        /// Reads the next byte from the reader and returns it
+        fn nextByte(self: *Self) Error!u8 {
+            const byte = self.reader.readByte();
+            self.index += 1;
+            return byte;
+        }
+
+        fn deserializeType(self: *Self, comptime T: type, value: *T) Error!void {
+            const byte = try nextByte();
+            switch (byte) {
+                'd' => try self.deserializeStruct(T, value),
+            }
+        }
+
+        fn deserializeStruct(self: *Self, comptime T: type, value: *T) Error!void {
+            while (self.last_char != 'e') {
+                const key = try self.deserializeKey();
+                defer self.gpa.free(key); // make sure to free the key as we won't need it any longer
+
+                // skip ':'
+                _ = try self.readByte();
+
+                try self.deserializeValue(T, value, key);
+            }
+        }
+
+        /// Deserializes a string value and changes spaces by an underscore to match fields
+        fn deserializeKey(self: *Self) Error![]const u8 {
+            const key_len = try self.deserializeLength();
+            const key = try self.gpa.alloc(u8, key_len);
+            try self.reader.readNoEof(key);
+            self.index += key_len;
+
+            for (key) |*c| {
+                if (c.* == ' ') c.* = '_';
+            }
+            return key;
+        }
+
+        /// Reads until it finds ':' and returns the integer value in front of it
+        fn deserializeLength(self: *Self, initial_byte: ?u8) Error!usize {
+            var list = std.ArrayList(u8).init(self.gpa);
+            defer list.deinit();
+
+            var current = initial_byte orelse try self.nextByte();
+            while (current != ':') : (current = try self.nextByte()) {
+                try list.append(current);
+            }
+
+            // All integers in Bencode are radix 10
+            return std.fmt.parseInt(usize, list.items, 10);
+        }
+
+        /// Deserializes a 
+        fn deserializeValue(self: *Self, comptime T: type, value: *T, key: []const u8) Error!void {}
+    };
+}
+
+/// Returns a new deserializer for the given `reader`
+pub fn deserializer(gpa: *Allocator, reader: anytype) Deserializer(@TypeOf(reader)) {
+    return Deserializer(@TypeOf(reader)).init(gpa, reader);
+}
 
 /// Bencode allows for parsing Bencode data
 /// It is up to the implementation to use nullable fields or not.
