@@ -1,7 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
 const http = @import("net/http.zig");
-const peer = @import("peer.zig");
+const Peer = @import("Peer.zig");
+const Allocator = std.mem.Allocator;
 
 const Bencode = @import("bencode.zig").Bencode;
 const Torrent = @import("torrent.zig").Torrent;
@@ -10,22 +11,26 @@ const Torrent = @import("torrent.zig").Torrent;
 /// Default based on 'BEP 3': http://bittorrent.org/beps/bep_0003.html
 const local_port: u16 = 6881;
 
-// sub struct, part of torrent bencode file
+/// sub struct, part of torrent bencode file
 const Info = struct {
+    /// Total length of the file
     length: usize,
+    /// Name of the torrent
     name: []const u8,
+    /// The length of each piece
     piece_length: usize,
+    /// The individual pieces as one slice of bytes
     pieces: []const u8,
 
     /// Generates a Sha1 hash of the info metadata.
-    fn hash(self: @This(), allocator: *std.mem.Allocator) ![20]u8 {
+    fn hash(self: Info, gpa: *Allocator) ![20]u8 {
         // allocate enough memory for buffer
         const size = self.pieces.len + self.name.len + 100;
-        var buffer = try allocator.alloc(u8, size);
-        errdefer allocator.free(buffer);
+        var buffer = try gpa.alloc(u8, size);
+        errdefer gpa.free(buffer);
 
         // encode to Bencode
-        var bencode = Bencode.init(allocator);
+        var bencode = Bencode.init(gpa);
         const length = try bencode.marshal(Info, self, buffer);
 
         // create sha1 hash of bencoded info
@@ -35,9 +40,9 @@ const Info = struct {
     }
 
     /// Retrieves the hashes of each individual piece
-    fn pieceHashes(self: @This(), allocator: *std.mem.Allocator) ![][20]u8 {
+    fn pieceHashes(self: Info, allocator: *Allocator) ![][20]u8 {
         const hashes = self.pieces.len / 20; // 20 bytes per hash
-        var buffer = try allocator.alloc([20]u8, hashes);
+        const buffer = try allocator.alloc([20]u8, hashes);
         errdefer allocator.free(buffer);
 
         // copy each hash into an element
@@ -50,21 +55,25 @@ const Info = struct {
     }
 };
 
-// Bencode file for torrent information
+/// Bencode file for torrent information
 const TorrentMeta = struct {
+    /// Torrent announce url
     announce: []const u8,
     comment: []const u8,
+    /// Torrent creation date as a usize
     creation_date: usize,
     httpseeds: []const []const u8,
+    /// Information regarding the pieces and the actual information required
+    /// to correctly request for data from peers
     info: Info,
 
     /// creates a new `TorrentFile` from our bencode information
     /// This also generates the hashes for each piece and the torrent info
-    pub fn file(self: @This(), allocator: *std.mem.Allocator) !TorrentFile {
+    pub fn file(self: @This(), gpa: *Allocator) !TorrentFile {
         const info = self.info;
         var hash: [20]u8 = undefined;
-        hash = try info.hash(allocator);
-        const piece_hashes = try info.pieceHashes(allocator);
+        hash = try info.hash(gpa);
+        const piece_hashes = try info.pieceHashes(gpa);
 
         return TorrentFile{
             .announce = self.announce,
@@ -80,13 +89,15 @@ const TorrentMeta = struct {
     }
 };
 
-// Bencode file with tracker information
+/// Bencode file with tracker information
 const Tracker = struct {
+    /// Defines how often trackers are refreshed by the host
     interval: usize,
+    /// Slice of all peers that are seeding
     peers: []const u8,
 };
 
-// struct to hold URL query information
+/// struct to hold URL query information
 const QueryParameter = struct {
     name: []const u8,
     value: []const u8,
@@ -94,7 +105,6 @@ const QueryParameter = struct {
 
 /// TorrentFile represents the data structure needed to retreive all torrent data
 pub const TorrentFile = struct {
-    const Self = @This();
     /// the URL to be called to retreive torrent data from
     announce: []const u8,
     /// hashed metadata of the torrent
@@ -108,17 +118,17 @@ pub const TorrentFile = struct {
     /// name of the torrent file
     name: []const u8,
     /// allocator to allocate and free objects memory
-    allocator: *std.mem.Allocator,
+    gpa: *Allocator,
     /// buffer contains the struct itself and is used to free the memory of itself
     buffer: []const u8,
 
     /// Generates the URL to retreive tracker information
-    pub fn trackerURL(self: Self, allocator: *std.mem.Allocator, peer_id: [20]u8, port: u16) ![]const u8 {
+    pub fn trackerURL(self: TorrentFile, allocator: *Allocator, peer_id: [20]u8, port: u16) ![]const u8 {
         // build our query paramaters
-        const port_slice = try intToSlice(allocator, port);
-        defer allocator.free(port_slice);
-        const size = try intToSlice(allocator, self.size);
-        defer allocator.free(size);
+        var buf: [4]u8 = undefined;
+        const port_slice = try std.fmt.bufPrint(&buf, "{d}", .{port});
+        var buf2: [100]u8 = undefined;
+        const size = try std.fmt.bufPrint(&buf2, "{d}", .{self.size});
 
         const queries = [_]QueryParameter{
             .{ .name = "info_hash", .value = &self.hash },
@@ -130,12 +140,13 @@ pub const TorrentFile = struct {
             .{ .name = "left", .value = size },
         };
 
-        return try encodeUrl(allocator, self.announce, queries[0..]);
+        return try encodeUrl(allocator, self.announce, &queries);
     }
 
-    pub fn deinit(self: Self) void {
-        self.allocator.free(self.piece_hashes);
-        self.allocator.free(self.buffer);
+    pub fn deinit(self: *TorrentFile) void {
+        self.gpa.free(self.piece_hashes);
+        self.gpa.free(self.buffer);
+        self.* = undefined;
     }
 
     /// Downloads the actual content and saves it to the given path
@@ -151,58 +162,51 @@ pub const TorrentFile = struct {
         };
 
         // create destination file
-        const full_path = try std.fs.path.join(self.allocator, &[_][]const u8{
+        const full_path = try std.fs.path.join(self.gpa, &[_][]const u8{
             path,
             self.name,
         });
-
-        defer self.allocator.free(full_path);
-        const cwd = std.fs.cwd();
-        var file = try cwd.createFile(full_path, .{ .lock = .Exclusive });
-        defer file.close();
+        defer self.gpa.free(full_path);
 
         // This is blocking
-        try torrent.download(self.allocator, &file);
+        try torrent.download(self.gpa, full_path);
     }
 
     /// calls the trackerURL to retrieve a list of peers and our interval
     /// of when we can obtain a new list of peers.
-    fn getPeers(self: Self, peer_id: [20]u8, port: u16) ![]peer.Peer {
-        const allocator = self.allocator;
-        const url = try self.trackerURL(allocator, peer_id, port);
+    fn getPeers(self: Self, peer_id: [20]u8, port: u16) ![]const Peer {
+        const url = try self.trackerURL(self.gpa, peer_id, port);
 
-        const resp = try http.get(allocator, url);
+        const resp = try http.get(self.gpa, url);
 
         if (!std.mem.eql(u8, resp.status_code, "200")) return error.CouldNotConnect;
 
         // the response is in bencode format, therefore decode it first
-        var bencode = try Bencode.init(allocator).unmarshal(Tracker, resp.body);
+        var bencode = try Bencode.init(self.gpa).unmarshal(Tracker, resp.body);
 
         // the peers are in binary format, so unmarshal those too.
-        return peer.unmarshal(allocator, bencode.peers);
+        return Peer.unmarshal(self.gpa, bencode.peers);
     }
 
     /// Opens a torrentfile from the given path
     /// and decodes the Bencode into a `TorrentFile`
-    pub fn open(allocator: *std.mem.Allocator, path: []const u8) !Self {
+    pub fn open(gpa: *Allocator, path: []const u8) !TorrentFile {
         if (!std.mem.endsWith(u8, path, ".torrent")) return error.WrongFormat;
 
         // open the file
-        const cwd = std.fs.cwd();
-        const file = try cwd.openFile(path, .{});
+        const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
-        const stat = try file.stat();
-        var buffer = try allocator.alloc(u8, stat.size);
-        _ = try file.inStream().readAll(buffer);
+        const content = file.readToEndAlloc(gpa, std.math.maxInt(usize));
+        errdefer gpa.free(content);
 
         // decode the bencode to retrieve our `Torrent` struct
-        var bencode = Bencode.init(allocator);
-        const torrent = try bencode.unmarshal(TorrentMeta, buffer);
-        errdefer allocator.free(buffer);
-        //TODO Remove this when we implement http seeds. For now free its memory to silence errors
-        allocator.free(torrent.httpseeds);
+        var bencode = Bencode.init(gpa);
+        const meta = try bencode.unmarshal(TorrentMeta, content);
 
-        var torrent_file = try torrent.file(allocator);
+        //TODO Remove this when we implement http seeds. For now free its memory to silence errors
+        gpa.free(meta.httpseeds);
+
+        var torrent_file = try meta.file(gpa);
         torrent_file.buffer = buffer;
         return torrent_file;
     }
@@ -236,7 +240,7 @@ fn generatePeerId() ![20]u8 {
 /// encodes queries into a query string attached to the provided base
 /// i.e. results example.com?parm=val where `base` is example.com
 /// and `queries` is a HashMap with key "parm" and value "val".
-fn encodeUrl(allocator: *std.mem.Allocator, base: []const u8, queries: []const QueryParameter) ![]const u8 {
+fn encodeUrl(allocator: *Allocator, base: []const u8, queries: []const QueryParameter) ![]const u8 {
     if (queries.len == 0) return base;
 
     // Predetermine the size needed for our buffer
@@ -277,7 +281,7 @@ fn encodeUrl(allocator: *std.mem.Allocator, base: []const u8, queries: []const Q
 
 /// Will create a string from the given integer.
 /// i.e. creates "1234" from 1234.
-fn intToSlice(allocator: *std.mem.Allocator, val: usize) ![]const u8 {
+fn intToSlice(allocator: *Allocator, val: usize) ![]const u8 {
     const buffer = try allocator.alloc(u8, 100);
     return buffer[0..std.fmt.formatIntBuf(buffer, val, 10, false, std.fmt.FormatOptions{})];
 }

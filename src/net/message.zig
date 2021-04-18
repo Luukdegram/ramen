@@ -31,6 +31,9 @@ pub const Message = union(enum(u8)) {
     /// Used to notify all-but-one peer to cancel data requests as the last piece is being received.
     cancel: Data,
 
+    /// Message types
+    pub const Tag = meta.Tag(Message);
+
     /// `Block` is a slice of data, and is a subset of `Piece`.
     pub const Block = []const u8;
 
@@ -93,7 +96,7 @@ pub const Message = union(enum(u8)) {
         if (length == 0) return null;
 
         const type_byte = try reader.readByte();
-        const message_type = meta.intToEnum(meta.Tag(Message), type_byte) catch return error.Unsupported;
+        const message_type = meta.intToEnum(Tag, type_byte) catch return error.Unsupported;
 
         return switch (message_type) {
             .choke => Message.choke,

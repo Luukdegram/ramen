@@ -1,50 +1,52 @@
 const std = @import("std");
 
-const Peer = @import("peer.zig").Peer;
+const Peer = @import("Peer.zig");
 const TorrentFile = @import("torrent_file.zig").TorrentFile;
 const Worker = @import("worker.zig").Worker;
 const Work = @import("worker.zig").Work;
 const WorkerContext = @import("worker.zig").WorkerContext;
-const MessageType = @import("net/message.zig").MessageType;
 const Client = @import("net/tcp_client.zig").TcpClient;
 
 pub const Torrent = struct {
     const Self = @This();
-    // peers is a list of seeders we can connect to
-    peers: []Peer,
-    // unique idee to identify ourselves to others
+    /// peers is a list of seeders we can connect to
+    peers: []const Peer,
+    /// unique id to identify ourselves to others
     peer_id: [20]u8,
-    // the corresponding torrent file that contains its meta data.
+    /// the corresponding torrent file that contains its meta data.
     file: *TorrentFile,
 
     /// Downloads the torrent and writes to the given stream
     pub fn download(
         self: Self,
-        allocator: *std.mem.Allocator,
-        file: *std.fs.File,
+        gpa: *std.mem.Allocator,
+        path: []const u8,
     ) !void {
         std.debug.warn("Download started for torrent: {}\n", .{self.file.name});
 
-        var queue = std.ArrayList(Work).init(allocator);
+        var queue = std.ArrayList(Work).init(gpa);
         defer queue.deinit();
 
         // Creates jobs for all pieces that needs to be downloaded
         for (self.file.piece_hashes) |hash, i| {
-            var work = Work.init(i, hash, self.pieceSize(i), allocator);
+            var work = Work.init(i, hash, self.pieceSize(i), gpa);
             try queue.append(work);
         }
 
         var mutex = std.Mutex.init();
         defer mutex.deinit();
 
-        var worker = Worker.init(allocator, &mutex, &self, &queue, file);
+        const file = try std.fs.cwd().createFile(path, .{ .lock = .exclusive });
+        defer file.close();
+
+        var worker = Worker.init(gpa, &mutex, &self, &queue, file);
 
         var context = WorkerContext{
             .worker = &worker,
         };
 
         std.debug.warn("Peer size: {}\n", .{self.peers.len});
-        var threads = try allocator.alloc(*std.Thread, self.peers.len);
+        var threads = try gpa.alloc(*std.Thread, self.peers.len);
         for (threads) |*t| {
             t.* = try std.Thread.spawn(&context, downloadWork);
         }
@@ -93,8 +95,8 @@ fn downloadWork(ctx: *WorkerContext) !void {
         };
         defer client.close();
 
-        try client.send(MessageType.Unchoke);
-        try client.send(MessageType.Interested);
+        try client.send(.unchoke);
+        try client.send(.interested);
 
         // our work loop, try to download all pieces of work
         while (worker.next()) |*work| {
