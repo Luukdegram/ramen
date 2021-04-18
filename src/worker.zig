@@ -1,10 +1,9 @@
 const std = @import("std");
-const Sha1 = std.crypto.Sha1;
+const Sha1 = std.crypto.hash.Sha1;
 const Allocator = std.mem.Allocator;
-const Peer = @import("peer.zig").Peer;
+const Peer = @import("Peer.zig");
 const Torrent = @import("torrent.zig").Torrent;
 const Client = @import("net/tcp_client.zig").TcpClient;
-const MessageType = @import("net/message.zig").MessageType;
 
 const max_items = 5;
 const max_block_size = 16384;
@@ -31,26 +30,26 @@ pub const Worker = struct {
     /// Remaining worker slots left based on peers
     workers: usize,
     /// allocator used for the workers to allocate and free memory
-    allocator: *Allocator,
+    gpa: *Allocator,
     /// the total size that has been downloaded so far
     downloaded: usize = 0,
     /// The file we write to
-    file: *std.fs.File,
+    file: std.fs.File,
 
     /// Creates a new worker for the given work
     pub fn init(
-        allocator: *Allocator,
+        gpa: *Allocator,
         mutex: *std.Mutex,
         torrent: *const Torrent,
         work: *std.ArrayList(Work),
-        file: *std.fs.File,
+        file: std.fs.File,
     ) Self {
         return Self{
             .mutex = mutex,
             .work = work,
             .torrent = torrent,
             .workers = torrent.peers.len,
-            .allocator = allocator,
+            .gpa = gpa,
             .file = file,
         };
     }
@@ -62,7 +61,7 @@ pub const Worker = struct {
         defer lock.release();
 
         const peer = if (self.workers > 0) self.torrent.peers[self.workers - 1] else return null;
-        var client = Client.init(self.allocator, peer, self.torrent.file.hash, self.torrent.peer_id);
+        var client = Client.init(self.gpa, peer, self.torrent.file.hash, self.torrent.peer_id);
         self.workers -= 1;
 
         return client;
@@ -103,7 +102,7 @@ pub const Work = struct {
     index: usize,
     hash: [20]u8,
     size: usize,
-    allocator: *std.mem.Allocator,
+    gpa: *Allocator,
     buffer: []u8,
 
     /// Initializes work and creates a buffer according to the given size,
@@ -112,7 +111,7 @@ pub const Work = struct {
         index: usize,
         hash: [20]u8,
         size: usize,
-        allocator: *std.mem.Allocator,
+        allocator: *Allocator,
     ) Self {
         return Self{
             .index = index,
@@ -130,7 +129,7 @@ pub const Work = struct {
         var requested: usize = 0;
         var backlog: usize = 0;
         // incase of an error, the thread function will take care of the memory
-        self.buffer = try self.allocator.alloc(u8, self.size);
+        self.buffer = try self.gpa.alloc(u8, self.size);
 
         // request to the peer for more bytes
         while (downloaded < self.size) {
@@ -145,7 +144,7 @@ pub const Work = struct {
 
             // read the message we received, this is blocking
             if (try client.read()) |message| {
-                defer self.allocator.free(message.payload);
+                defer self.gpa.free(message.payload);
                 switch (message.message_type) {
                     .Choke => client.choked = true,
                     .Unchoke => client.choked = false,
@@ -172,7 +171,7 @@ pub const Work = struct {
     /// Frees the Work's memory
     pub fn deinit(self: *Self) void {
         //TODO self.buffer can be undefined
-        self.allocator.free(self.buffer);
+        self.gpa.free(self.buffer);
         self.* = undefined;
     }
 
