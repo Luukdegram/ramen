@@ -4,7 +4,7 @@ const http = @import("net/http.zig");
 const Peer = @import("Peer.zig");
 const Allocator = std.mem.Allocator;
 
-const Bencode = @import("bencode.zig").Bencode;
+const bencode = @import("bencode.zig");
 const Torrent = @import("torrent.zig").Torrent;
 
 /// Our port we will seed from when we implement seeding
@@ -24,26 +24,24 @@ const Info = struct {
 
     /// Generates a Sha1 hash of the info metadata.
     fn hash(self: Info, gpa: *Allocator) ![20]u8 {
-        // allocate enough memory for buffer
-        const size = self.pieces.len + self.name.len + 100;
-        var buffer = try gpa.alloc(u8, size);
-        errdefer gpa.free(buffer);
+        // create arraylist for writer with some initial capacity to reduce allocation count
+        var list = std.ArrayList(u8).initCapacity(gpa, self.pieces.len + self.name.len);
+        defer list.deinit();
 
-        // encode to Bencode
-        var bencode = Bencode.init(gpa);
-        const length = try bencode.marshal(Info, self, buffer);
+        var serializer = bencode.serializer(list.writer());
+        const serialized_result = try serializer.serialize(self);
 
         // create sha1 hash of bencoded info
         var result: [20]u8 = undefined;
-        std.crypto.Sha1.hash(buffer[0..length], &result);
+        std.crypto.Sha1.hash(serialized_result, &result);
         return result;
     }
 
     /// Retrieves the hashes of each individual piece
-    fn pieceHashes(self: Info, allocator: *Allocator) ![][20]u8 {
+    fn pieceHashes(self: Info, gpa: *Allocator) ![][20]u8 {
         const hashes = self.pieces.len / 20; // 20 bytes per hash
-        const buffer = try allocator.alloc([20]u8, hashes);
-        errdefer allocator.free(buffer);
+        const buffer = try gpa.alloc([20]u8, hashes);
+        errdefer gpa.free(buffer);
 
         // copy each hash into an element
         var i: usize = 0;
@@ -59,34 +57,15 @@ const Info = struct {
 const TorrentMeta = struct {
     /// Torrent announce url
     announce: []const u8,
+    /// Comment regarding the torrent file
     comment: []const u8,
     /// Torrent creation date as a usize
     creation_date: usize,
+    /// Slice of http seeds
     httpseeds: []const []const u8,
     /// Information regarding the pieces and the actual information required
     /// to correctly request for data from peers
     info: Info,
-
-    /// creates a new `TorrentFile` from our bencode information
-    /// This also generates the hashes for each piece and the torrent info
-    pub fn file(self: @This(), gpa: *Allocator) !TorrentFile {
-        const info = self.info;
-        var hash: [20]u8 = undefined;
-        hash = try info.hash(gpa);
-        const piece_hashes = try info.pieceHashes(gpa);
-
-        return TorrentFile{
-            .announce = self.announce,
-            .hash = hash,
-            .piece_hashes = piece_hashes,
-            .piece_length = info.piece_length,
-            .size = info.length,
-            .name = info.name,
-            .allocator = allocator,
-            // leave buffer undefined as its set in the callee's function
-            .buffer = undefined,
-        };
-    }
 };
 
 /// Bencode file with tracker information
@@ -117,13 +96,12 @@ pub const TorrentFile = struct {
     size: usize,
     /// name of the torrent file
     name: []const u8,
-    /// allocator to allocate and free objects memory
-    gpa: *Allocator,
-    /// buffer contains the struct itself and is used to free the memory of itself
-    buffer: []const u8,
+    /// The arena state, used to free all memory allocated at once
+    /// during the TorrentFile generation
+    state: std.heap.ArenaAllocator.State,
 
     /// Generates the URL to retreive tracker information
-    pub fn trackerURL(self: TorrentFile, allocator: *Allocator, peer_id: [20]u8, port: u16) ![]const u8 {
+    pub fn trackerURL(self: TorrentFile, gpa: *Allocator, peer_id: [20]u8, port: u16) ![]const u8 {
         // build our query paramaters
         var buf: [4]u8 = undefined;
         const port_slice = try std.fmt.bufPrint(&buf, "{d}", .{port});
@@ -140,20 +118,19 @@ pub const TorrentFile = struct {
             .{ .name = "left", .value = size },
         };
 
-        return try encodeUrl(allocator, self.announce, &queries);
+        return try encodeUrl(gpa, self.announce, &queries);
     }
 
-    pub fn deinit(self: *TorrentFile) void {
-        self.gpa.free(self.piece_hashes);
-        self.gpa.free(self.buffer);
+    pub fn deinit(self: *TorrentFile, gpa: *Allocator) void {
+        self.state.promote(gpa).deinit();
         self.* = undefined;
     }
 
     /// Downloads the actual content and saves it to the given path
-    pub fn download(self: *Self, path: []const u8) !void {
+    pub fn download(self: *TorrentFile, gpa: *Allocator, path: []const u8) !void {
         // build our peers to connect to
         const peer_id = try generatePeerId();
-        const peers = try self.getPeers(peer_id, local_port);
+        const peers = try self.getPeers(gpa, peer_id, local_port);
 
         const torrent = Torrent{
             .peers = peers,
@@ -162,30 +139,34 @@ pub const TorrentFile = struct {
         };
 
         // create destination file
-        const full_path = try std.fs.path.join(self.gpa, &[_][]const u8{
+        const full_path = try std.fs.path.join(gpa, &[_][]const u8{
             path,
             self.name,
         });
-        defer self.gpa.free(full_path);
+        defer gpa.free(full_path);
 
-        // This is blocking
-        try torrent.download(self.gpa, full_path);
+        // This is blocking and will actually download the contents of the torrent
+        try torrent.download(gpa, full_path);
     }
 
     /// calls the trackerURL to retrieve a list of peers and our interval
     /// of when we can obtain a new list of peers.
-    fn getPeers(self: Self, peer_id: [20]u8, port: u16) ![]const Peer {
+    fn getPeers(self: TorrentFile, gpa: *Allocator, peer_id: [20]u8, port: u16) ![]const Peer {
         const url = try self.trackerURL(self.gpa, peer_id, port);
 
-        const resp = try http.get(self.gpa, url);
+        const resp = try http.get(gpa, url);
 
         if (!std.mem.eql(u8, resp.status_code, "200")) return error.CouldNotConnect;
 
-        // the response is in bencode format, therefore decode it first
-        var bencode = try Bencode.init(self.gpa).unmarshal(Tracker, resp.body);
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+
+        var stream = std.io.fixedBufferStream(resp.body);
+        var deserializer = bencode.deserializer(&arena.allocator, stream.reader());
+        const tracker = try deserializer.deserialize(Tracker);
 
         // the peers are in binary format, so unmarshal those too.
-        return Peer.unmarshal(self.gpa, bencode.peers);
+        return Peer.unmarshal(gpa, tracker.peers);
     }
 
     /// Opens a torrentfile from the given path
@@ -196,19 +177,24 @@ pub const TorrentFile = struct {
         // open the file
         const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
-        const content = file.readToEndAlloc(gpa, std.math.maxInt(usize));
-        errdefer gpa.free(content);
 
-        // decode the bencode to retrieve our `Torrent` struct
-        var bencode = Bencode.init(gpa);
-        const meta = try bencode.unmarshal(TorrentMeta, content);
+        var arena = std.heap.ArenaAllocator.init(gpa);
 
-        //TODO Remove this when we implement http seeds. For now free its memory to silence errors
-        gpa.free(meta.httpseeds);
+        var deserializer = bencode.deserializer(&arena.allocator, file.reader());
+        const meta = try deserializer.deserialize(TorrentMeta);
 
-        var torrent_file = try meta.file(gpa);
-        torrent_file.buffer = buffer;
-        return torrent_file;
+        const hash = try self.info.hash(&arena.allocator);
+        const piece_hashes = try self.info.pieceHashes(&arena.allocator);
+
+        return TorrentFile{
+            .announce = meta.announce,
+            .hash = hash,
+            .piece_hashes = piece_hashes,
+            .piece_length = info.piece_length,
+            .size = info.length,
+            .name = info.name,
+            .state = arena.state,
+        };
     }
 };
 
