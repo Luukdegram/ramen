@@ -4,21 +4,104 @@ const meta = std.meta;
 const trait = meta.trait;
 const testing = std.testing;
 
-pub fn Deserializer(ReaderType: type) type {
+/// Creates a new Deserializer type for the given reader type
+pub fn Deserializer(comptime ReaderType: type) type {
     return struct {
         const Self = @This();
         /// Reader that is being read from while deserializing
         reader: ReaderType,
         gpa: *Allocator,
-        /// Counter to what has been read so far
-        index: usize,
         /// Last character that was read from the stream
         last_char: u8,
 
-        pub const Error = ReaderType.Error || std.fmt.ParseIntError;
+        pub const Error = ReaderType.Error || std.fmt.ParseIntError ||
+            error{ OutOfMemory, UnsupportedType, EndOfStream };
+
+        const Pair = struct { key: []const u8, value: Value };
+
+        /// Represents a bencode value
+        const Value = union(enum) {
+            bytes: []u8,
+            int: usize,
+            list: []Value,
+            dictionary: []Pair,
+
+            fn deinit(self: Value, gpa: *Allocator) void {
+                switch (self) {
+                    .bytes => |bytes| gpa.free(bytes),
+                    .int => {},
+                    .list => |list| {
+                        for (list) |item| item.deinit(gpa);
+                        gpa.free(list);
+                    },
+                    .dictionary => |dict| {
+                        for (dict) |pair| {
+                            gpa.free(pair.key);
+                            pair.value.deinit(gpa);
+                        }
+                        gpa.free(dict);
+                    },
+                }
+            }
+
+            /// Attempts to convert a `Value` into given zig type `T`
+            fn toZigType(self: Value, comptime T: type, gpa: *Allocator) Error!T {
+                if (T == []u8 or T == []const u8) return self.bytes;
+                switch (@typeInfo(T)) {
+                    .Struct => {
+                        var struct_value: T = undefined;
+                        inline for (meta.fields(T)) |field| {
+                            if (self.getField(field.name)) |pair| {
+                                const field_value = try pair.value.toZigType(field.field_type, gpa);
+                                @field(struct_value, field.name) = @as(field.field_type, field_value);
+                            }
+                        }
+                        return struct_value;
+                    },
+                    .Int => return @as(T, self.int),
+                    .Optional => |opt| return try self.toZigType(opt.child, gpa),
+                    .Pointer => |ptr| switch (ptr.size) {
+                        .Slice => {
+                            const ChildType = meta.Child(T);
+                            var list = std.ArrayList(ChildType).init(gpa);
+                            defer list.deinit();
+
+                            for (self.list) |item| {
+                                const element = try item.toZigType(ChildType, gpa);
+                                try list.append(element);
+                            }
+                            return @as(T, list.toOwnedSlice());
+                        },
+                        .One => try self.toZigType(ptr.child, gpa),
+                        else => return error.Unsupported,
+                    },
+                    else => return error.UnsupportedType,
+                }
+            }
+
+            /// Asserts `Value` is Dictionary and returns dictionary pair if it contains given key
+            /// else returns null
+            fn getField(self: Value, key: []const u8) ?Pair {
+                return for (self.dictionary) |pair| {
+                    if (eql(key, pair.key)) break pair;
+                } else null;
+            }
+
+            /// Checks if a field name equals that of a key
+            /// replaces '_' with a ' ' if needed as bencode allows keys to have spaces
+            fn eql(field: []const u8, key: []const u8) bool {
+                if (field.len != key.len) return false;
+                return for (field) |c, i| {
+                    if (c != key[i]) {
+                        if (c == '_' and key[i] == ' ') continue;
+                        break false;
+                    }
+                } else true;
+            }
+        };
 
         pub fn init(gpa: *Allocator, reader: ReaderType) Self {
-            return .{ .reader = reader, .gpa = gpa, .index = 0, .last_char = undefined };
+            return .{ .reader = reader, .gpa = gpa, .last_char = undefined };
         }
 
         /// Deserializes the current reader's stream into the given type `T`
@@ -26,66 +109,93 @@ pub fn Deserializer(ReaderType: type) type {
         /// and can be freed upon calling `deinit` afterwards.
         pub fn deserialize(self: *Self, comptime T: type) Error!T {
             if (@typeInfo(T) != .Struct) @compileError("T must be a struct Type.");
-            var value: T = undefined;
-            try self.deserializeType(T, &value);
-            return value;
+
+            try self.nextByte(); // go to first byte
+            const result = try self.deserializeValue();
+            std.debug.assert(self.last_char == 'e');
+            return try result.toZigType(T, self.gpa);
         }
 
         /// Reads the next byte from the reader and returns it
-        fn nextByte(self: *Self) Error!u8 {
-            const byte = self.reader.readByte();
-            self.index += 1;
-            return byte;
+        fn nextByte(self: *Self) Error!void {
+            const byte = try self.reader.readByte();
+            self.last_char = byte;
+            while (byte == '\n') {
+                try self.nextByte();
+            }
+            return;
         }
 
-        fn deserializeType(self: *Self, comptime T: type, value: *T) Error!void {
-            const byte = try nextByte();
-            switch (byte) {
-                'd' => try self.deserializeStruct(T, value),
-            }
+        fn deserializeValue(self: *Self) Error!Value {
+            return switch (self.last_char) {
+                '0'...'9' => |c| Value{ .bytes = try self.deserializeBytes() },
+                'i' => blk: {
+                    try self.nextByte(); // skip 'i'
+                    break :blk Value{ .int = try self.deserializeLength() };
+                },
+                'l' => Value{ .list = try self.deserializeList() },
+                'd' => Value{ .dictionary = try self.deserializeDict() },
+                ' ', '\n' => return try self.deserializeValue(),
+                else => unreachable,
+            };
         }
 
-        fn deserializeStruct(self: *Self, comptime T: type, value: *T) Error!void {
-            while (self.last_char != 'e') {
-                const key = try self.deserializeKey();
-                defer self.gpa.free(key); // make sure to free the key as we won't need it any longer
-
-                // skip ':'
-                _ = try self.readByte();
-
-                try self.deserializeValue(T, value, key);
-            }
-        }
-
-        /// Deserializes a string value and changes spaces by an underscore to match fields
-        fn deserializeKey(self: *Self) Error![]const u8 {
-            const key_len = try self.deserializeLength();
-            const key = try self.gpa.alloc(u8, key_len);
-            try self.reader.readNoEof(key);
-            self.index += key_len;
-
-            for (key) |*c| {
-                if (c.* == ' ') c.* = '_';
-            }
-            return key;
+        /// Deserializes a slice of bytes
+        fn deserializeBytes(self: *Self) Error![]u8 {
+            const len = try self.deserializeLength();
+            const value = try self.gpa.alloc(u8, len);
+            try self.reader.readNoEof(value);
+            self.last_char = value[len - 1];
+            return value;
         }
 
         /// Reads until it finds ':' and returns the integer value in front of it
-        fn deserializeLength(self: *Self, initial_byte: ?u8) Error!usize {
+        fn deserializeLength(self: *Self) Error!usize {
             var list = std.ArrayList(u8).init(self.gpa);
             defer list.deinit();
 
-            var current = initial_byte orelse try self.nextByte();
-            while (current != ':') : (current = try self.nextByte()) {
-                try list.append(current);
+            while (self.last_char >= '0' and self.last_char <= '9') : (try self.nextByte()) {
+                try list.append(self.last_char);
             }
 
             // All integers in Bencode are radix 10
-            return std.fmt.parseInt(usize, list.items, 10);
+            const integer = try std.fmt.parseInt(usize, list.items, 10);
+            return integer;
         }
 
-        /// Deserializes a 
-        fn deserializeValue(self: *Self, comptime T: type, value: *T, key: []const u8) Error!void {}
+        /// Deserializes into a slice of `Value` until it finds the 'e'
+        fn deserializeList(self: *Self) Error![]Value {
+            var list = std.ArrayList(Value).init(self.gpa);
+            defer list.deinit();
+            errdefer for (list.items) |item| item.deinit(self.gpa);
+
+            while (self.last_char != 'e') : (try self.nextByte()) {
+                const value = try self.deserializeValue();
+                try list.append(value);
+            }
+            return list.toOwnedSlice();
+        }
+
+        /// Deserializes a dictionary bencode object into a slice of `Pair`
+        fn deserializeDict(self: *Self) Error![]Pair {
+            var list = std.ArrayList(Pair).init(self.gpa);
+            defer list.deinit();
+            errdefer for (list.items) |pair| {
+                self.gpa.free(pair.key);
+                pair.value.deinit(self.gpa);
+            };
+
+            // go to first byte after 'd'
+            try self.nextByte();
+
+            while (self.last_char != 'e') : (try self.nextByte()) {
+                const key = try self.deserializeBytes();
+                try self.nextByte();
+                const value = try self.deserializeValue();
+                try list.append(.{ .key = key, .value = value });
+            }
+            return list.toOwnedSlice();
+        }
     };
 }
 
@@ -94,309 +204,92 @@ pub fn deserializer(gpa: *Allocator, reader: anytype) Deserializer(@TypeOf(reade
     return Deserializer(@TypeOf(reader)).init(gpa, reader);
 }
 
-/// Bencode allows for parsing Bencode data
-/// It is up to the implementation to use nullable fields or not.
-/// Currently this does not check if a field is mandatory or not.
-/// Also, lists are currently not supported.
-pub const Bencode = struct {
-    const Self = @This();
-
-    allocator: *std.mem.Allocator,
-    cursor: usize = 0,
-    buffer: []const u8,
-
-    pub fn init(allocator: *std.mem.Allocator) Self {
-        return Self{ .allocator = allocator, .buffer = undefined };
-    }
-
-    /// unmarshal tries to parse the given bencode bytes into Type T.
-    pub fn unmarshal(
-        self: *Self,
-        comptime T: type,
-        bytes: []const u8,
-    ) !T {
-        self.cursor = 0; // reset cursor
-        self.buffer = bytes;
-        var decoded: T = undefined;
-        try self.parse(T, &decoded);
-        return decoded;
-    }
-
-    /// Encodes the given struct into Bencode encoded bytes
-    pub fn marshal(
-        self: *Self,
-        comptime T: type,
-        value: anytype,
-        buffer: []u8,
-    ) !usize {
-        self.cursor = 0;
-        _ = try self.encode(T, value, buffer);
-        return self.cursor;
-    }
-
-    fn parse(self: *Self, comptime T: type, value: *T) !void {
-        var builder = Builder(T).init(value);
-
-        // parse the bytes
-        for (self.buffer) |c, i| {
-            if (i < self.cursor) {
-                // current byte is behind cursor, which means we already parsed it
-                // skip to the next byte
-                continue;
-            }
-            switch (c) {
-                // also detect next lines.
-                '\n' => self.cursor += 1,
-                // defines string length
-                '0'...'9' => {
-                    const str = try self.decodeString();
-                    try builder.set(str, self.allocator);
-                },
-                // directory -> new struct
-                'd' => {
-                    if (builder.map()) {
-                        // save current field in a buffer so we can modify if required
-                        // i.e. the field contains spaces so we want to replace it with an underscore.
-                        var buffer = try self.allocator.alloc(u8, builder.field.len);
-                        std.mem.copy(u8, buffer, builder.field);
-                        defer self.allocator.free(buffer);
-                        if (std.mem.indexOf(u8, buffer, " ")) |index| {
-                            buffer[index] = '_';
-                        }
-
-                        switch (@typeInfo(T)) {
-                            .Struct => |struct_info| {
-                                inline for (struct_info.fields) |field| {
-                                    // if field is current field, set it.
-                                    if (std.mem.eql(u8, field.name, buffer)) {
-                                        var child: field.field_type = undefined;
-                                        try self.parse(field.field_type, &child);
-                                        try builder.set(child, self.allocator);
-                                    }
-                                }
-                            },
-                            else => {
-                                unreachable;
-                            },
-                        }
-                    }
-
-                    self.cursor += 1;
-                },
-                // integer size, read until e
-                'i' => {
-                    builder.buildValue();
-                    const length = std.mem.indexOf(u8, self.buffer[self.cursor..], "e") orelse return error.InvalidBencode;
-                    const buf = self.buffer[self.cursor + 1 .. self.cursor + length];
-                    const val: usize = try std.fmt.parseInt(usize, buf, 10);
-                    try builder.set(val, self.allocator);
-                    self.cursor += length + 1;
-                },
-                // array
-                'l' => {
-                    self.cursor += 1;
-                    const list = try self.parseList();
-                    errdefer self.allocator.free(list);
-                    try builder.set(list, self.allocator);
-                    self.cursor += 1;
-                },
-                'e' => {
-                    value.* = builder.val.*;
-                    self.cursor += 1;
-                    return;
-                },
-                else => {
-                    return error.UnknownCharacter;
-                },
-            }
-        }
-        value.* = builder.val.*;
-        return;
-    }
-
-    /// recursive function that constructs a byte array containing bencoded data
-    fn encode(
-        self: *Self,
-        comptime T: type,
-        value: anytype,
-        buffer: []u8,
-    ) !usize {
-        std.mem.copy(u8, buffer[self.cursor..], "d");
-        self.cursor += 1;
-        switch (@typeInfo(T)) {
-            .Struct => |info| {
-                inline for (info.fields) |field| {
-                    // save current field in a buffer so we can modify if required
-                    // i.e. the field contains an underscode so we want to replace it with a space.
-                    var field_name = try self.allocator.alloc(u8, field.name.len);
-                    std.mem.copy(u8, field_name, field.name);
-                    defer self.allocator.free(field_name);
-                    if (std.mem.indexOf(u8, field_name, "_")) |index| {
-                        field_name[index] = ' ';
-                    }
-                    switch (@typeInfo(field.field_type)) {
-                        .Struct => |child| {
-                            _ = try self.encode(field.field_type, @field(value, field.name), buffer);
-                        },
-                        .Int, .Float => {
-                            const print_result = try std.fmt.bufPrint(buffer[self.cursor..], "{}:{}i{}e", .{
-                                field.name.len,
-                                field_name,
-                                @field(value, field.name),
-                            });
-                            self.cursor += print_result.len;
-                        },
-                        else => {
-                            var result = try std.fmt.bufPrint(buffer[self.cursor..], "{}:{}{}:{}", .{
-                                field.name.len,
-                                field_name,
-                                @field(value, field.name).len,
-                                @field(value, field.name),
-                            });
-                            self.cursor += result.len;
-                        },
-                    }
-                }
-            },
-            else => return error.NotSupported,
-        }
-        std.mem.copy(u8, buffer[self.cursor..], "e");
-        self.cursor += 1;
-
-        return self.cursor;
-    }
-
-    // decodes a slice into a string based on the length provided in the slice
-    // noted by xx: where xx is the length
-    fn decodeString(self: *Self) ![]const u8 {
-        const length: u64 = try self.decodeInt();
-        const str = self.buffer[self.cursor .. self.cursor + length];
-        self.cursor += length;
-        return str;
-    }
-
-    // decodes the next integer found before the color (:) symbol
-    fn decodeInt(self: *Self) !usize {
-        const index = std.mem.indexOf(u8, self.buffer[self.cursor..], ":") orelse return error.UnexpectedCharacter;
-        const int = self.buffer[self.cursor .. self.cursor + index];
-        self.cursor += index + 1;
-
-        return std.fmt.parseInt(usize, int, 10);
-    }
-
-    fn parseList(self: *Self) ![]const []const u8 {
-        var list = std.ArrayList([]const u8).init(self.allocator);
-        while (self.buffer[self.cursor] != 'e') {
-            const str = try self.decodeString();
-            try list.append(str);
-        }
-        return list.toOwnedSlice();
-    }
-};
-
-/// Builder is a helper struct that set the fields on the given Type
-/// based on the input given.
-fn Builder(comptime T: type) type {
+/// Creates a Serializer type for the given writer type
+pub fn Serializer(comptime WriterType: anytype) type {
     return struct {
+        writer: WriterType,
+
         const Self = @This();
 
-        field: []const u8,
-        state: State,
-        val: *T,
+        pub const Error = WriterType.Error || error{OutOfMemory};
 
-        fn init(value: *T) Self {
-            return Self{
-                .state = undefined,
-                .val = value,
-                .field = undefined,
-            };
+        /// Creates new instance of the Serializer type
+        pub fn init(writer: WriterType) Self {
+            return .{ .writer = writer };
         }
 
-        const State = enum {
-            SetValue,
-            SetField,
-            SetStruct,
-        };
-
-        fn map(self: *Self) bool {
-            if (self.state != .SetValue) return false;
-            self.state = .SetStruct;
-            return true;
-        }
-
-        fn buildValue(self: *Self) void {
-            self.state = .SetValue;
-        }
-
-        fn set(
-            self: *Self,
-            str: anytype,
-            allocator: *std.mem.Allocator,
-        ) !void {
-            switch (self.state) {
-                .SetValue, .SetStruct => {
-                    // save current field in a buffer so we can modify if required
-                    // i.e. the field contains spaces so we want to replace it with an underscore.
-                    var buffer = try allocator.alloc(u8, self.field.len);
-                    std.mem.copy(u8, buffer, self.field);
-                    defer allocator.free(buffer);
-                    if (std.mem.indexOf(u8, buffer, " ")) |index| {
-                        buffer[index] = '_';
-                    }
-
-                    // ensure T is a struct and get its fields
-                    switch (@typeInfo(T)) {
-                        .Struct => |struct_info| {
-                            inline for (struct_info.fields) |field| {
-                                // if field is current field, set it.
-                                if (std.mem.eql(u8, field.name, buffer)) {
-                                    if (@TypeOf(@field(self.val, field.name)) == @TypeOf(str)) {
-                                        @field(self.val, field.name) = str;
-                                    }
-                                }
-                            }
-                        },
-                        else => {
-                            // Maybe implement later
-                            return error.UnsupportedType;
-                        },
-                    }
-                    self.state = .SetField;
-                },
-                else => {
-                    // Only set a field when the input is of type []const u8
-                    // as names cannot be of any other type. This will be inlined by the compiler.
-                    if (@TypeOf(str) == []const u8) {
-                        self.field = str;
-                    }
-                    self.state = .SetValue;
-                },
+        /// Serializes the given value to bencode and writes the result to the writer
+        pub fn serialize(self: Self, value: anytype) Error!void {
+            const T = @TypeOf(value);
+            if (T == []u8 or T == []const u8) {
+                return try self.serializeString(value);
             }
+
+            switch (@typeInfo(T)) {
+                .Struct => try self.serializeStruct(value),
+                .Int => try self.serializeInt(value),
+                .Pointer => |ptr| switch (ptr.size) {
+                    .Slice => try self.serializeList(value),
+                    .One => try self.serialize(ptr.child),
+                    .C, .Many => unreachable, // unsupported
+                },
+                .Optional => |opt| try self.serialize(opt.child),
+                else => unreachable, // unsupported
+            }
+        }
+
+        /// Serializes a struct into bencode
+        fn serializeStruct(self: Self, value: anytype) Error!void {
+            try self.writer.writeByte('d');
+            inline for (meta.fields(@TypeOf(value))) |field| {
+                try self.writer.print("{d}:{s}", .{ field.name.len, &encodeFieldName(field.name) });
+                try self.serialize(@field(value, field.name));
+            }
+            try self.writer.writeByte('e');
+        }
+
+        /// Encodes a field name to bencode field by replacing underscores to spaces
+        fn encodeFieldName(comptime name: []const u8) [name.len]u8 {
+            var result: [name.len]u8 = undefined;
+            for (name) |c, i| {
+                const actual = if (c == '_') ' ' else c;
+                result[i] = actual;
+            }
+            return result;
+        }
+
+        /// Serializes an integer to bencode integer
+        fn serializeInt(self: Self, value: anytype) Error!void {
+            try self.writer.print("i{d}e", .{value});
+        }
+
+        /// Serializes a slice of bytes to bencode string
+        fn serializeString(self: Self, value: []const u8) Error!void {
+            try self.writer.print("{d}:{s}", .{ value.len, value });
+        }
+
+        /// Serializes a slice of elements to bencode list
+        fn serializeList(self: Self, value: anytype) Error!void {
+            try self.writer.writeByte('l');
+            for (value) |element| try self.serialize(element);
+            try self.writer.writeByte('e');
         }
     };
 }
 
-test "unmarshal basic string" {
+/// Creates a new serializer instance with a Serializer type based on the given writer
+pub fn serializer(writer: anytype) Serializer(@TypeOf(writer)) {
+    return Serializer(@TypeOf(writer)).init(writer);
+}
+
+test "Deserialize Bencode to Zig struct" {
     // allow newlines to increase readability of test
     var bencode_string =
-        \\d
-        \\8:announce
-        \\41:http://bttracker.debian.org:6969/announce
-        \\7:comment
-        \\35:"Debian CD from cdimage.debian.org"
-        \\13:creation date
-        \\i1573903810e
-        \\4:info
-        \\d
-        \\6:length
-        \\i351272960e
-        \\4:name
-        \\31:debian-10.2.0-amd64-netinst.iso
-        \\12:piece length
-        \\i262144e
-        \\e
-        \\e
-    ;
+        "d8:announce41:http://bttracker.debian.org:6969/announce" ++
+        "7:comment35:\"Debian CD from cdimage.debian.org\"13:creation date" ++
+        "i1573903810e4:infod6:lengthi351272960e4:name31:debian-10.2.0-amd64-netinst.iso" ++
+        "12:piece lengthi262144eee";
+
     const Info = struct {
         length: usize,
         name: []const u8,
@@ -421,30 +314,41 @@ test "unmarshal basic string" {
         },
     };
 
-    var bencode = Bencode.init(testing.allocator);
-    const result = try bencode.unmarshal(Announce, bencode_string);
+    var in = std.io.fixedBufferStream(bencode_string);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var des = deserializer(&arena.allocator, in.reader());
+    const result = try des.deserialize(Announce);
     testing.expectEqual(expected.creation_date, result.creation_date);
-    testing.expectEqualSlices(u8, expected.announce, result.announce);
-    testing.expectEqualSlices(u8, expected.info.name, result.info.name);
-    testing.expectEqualSlices(u8, expected.comment, result.comment);
+    testing.expectEqualStrings(expected.announce, result.announce);
+    testing.expectEqualStrings(expected.info.name, result.info.name);
+    testing.expectEqualStrings(expected.comment, result.comment);
+    testing.expectEqual(expected.info.length, result.info.length);
 }
 
-test "Encode struct to Bencode" {
+test "Serialize Zig value to Bencode" {
     const Child = struct {
-        field: []const u8 = "other value",
+        field: []const u8,
     };
+
     const TestStruct = struct {
-        name: []const u8 = "random value",
-        length: usize = 1236,
-        child: Child = Child{},
+        name: []const u8,
+        length: usize,
+        child: Child,
     };
 
-    const value = TestStruct{};
-    var bencode = Bencode.init(testing.allocator);
-    var buffer = try testing.allocator.alloc(u8, 2048);
-    const result = try bencode.marshal(TestStruct, value, buffer);
-    defer testing.allocator.free(buffer);
+    const value = TestStruct{
+        .name = "random value",
+        .length = 1236,
+        .child = .{ .field = "other value" },
+    };
 
-    const expected = "d4:name12:random value6:lengthi1236ed5:field11:other valueee";
-    testing.expectEqualSlices(u8, expected, buffer[0..result]);
+    var list = std.ArrayList(u8).init(testing.allocator);
+    defer list.deinit();
+
+    var ser = serializer(list.writer());
+    try ser.serialize(value);
+
+    const expected = "d4:name12:random value6:lengthi1236e5:childd5:field11:other valueee";
+    testing.expectEqualStrings(expected, list.items);
 }
