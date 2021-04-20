@@ -3,6 +3,7 @@ const testing = std.testing;
 const http = @import("net/http.zig");
 const Peer = @import("Peer.zig");
 const Allocator = std.mem.Allocator;
+const Sha1 = std.crypto.hash.Sha1;
 
 const bencode = @import("bencode.zig");
 const Torrent = @import("torrent.zig").Torrent;
@@ -13,27 +14,43 @@ const local_port: u16 = 6881;
 
 /// sub struct, part of torrent bencode file
 const Info = struct {
-    /// Total length of the file
-    length: usize,
-    /// Name of the torrent
+    /// Total length of the file in case of a single-file torrent.
+    /// Null when the torrent is a multi-file torrent
+    length: ?usize = null,
+    /// In case of multi-file torrents, `files` will be non-null
+    /// and includes a list of directories with each file size
+    files: ?[]const struct {
+        length: usize,
+        path: []const []const u8,
+    } = null,
+    /// Name of the torrentfile
     name: []const u8,
     /// The length of each piece
     piece_length: usize,
     /// The individual pieces as one slice of bytes
+    /// Totals to an amount multiple of 20. Where each 20 bytes equals to a SHA1 hash.
     pieces: []const u8,
 
     /// Generates a Sha1 hash of the info metadata.
     fn hash(self: Info, gpa: *Allocator) ![20]u8 {
         // create arraylist for writer with some initial capacity to reduce allocation count
-        var list = std.ArrayList(u8).initCapacity(gpa, self.pieces.len + self.name.len);
+        var list = std.ArrayList(u8).init(gpa);
         defer list.deinit();
 
         var serializer = bencode.serializer(list.writer());
-        const serialized_result = try serializer.serialize(self);
+        try serializer.serialize(self);
+
+        var stream = std.io.fixedBufferStream(list.items);
+        var des = bencode.deserializer(gpa, stream.reader());
+        const info = try des.deserialize(Info);
+
+        std.debug.print("Names: {s} - {s}\n", .{ self.name, info.name });
+        std.debug.print("Pieces length: {d} - {d}\n", .{ self.pieces.len, info.pieces.len });
 
         // create sha1 hash of bencoded info
         var result: [20]u8 = undefined;
-        std.crypto.Sha1.hash(serialized_result, &result);
+        Sha1.hash(list.items, &result, .{});
+        std.debug.print("Hash: {s}\n", .{result});
         return result;
     }
 
@@ -57,12 +74,6 @@ const Info = struct {
 const TorrentMeta = struct {
     /// Torrent announce url
     announce: []const u8,
-    /// Comment regarding the torrent file
-    comment: []const u8,
-    /// Torrent creation date as a usize
-    creation_date: usize,
-    /// Slice of http seeds
-    httpseeds: []const []const u8,
     /// Information regarding the pieces and the actual information required
     /// to correctly request for data from peers
     info: Info,
@@ -146,16 +157,22 @@ pub const TorrentFile = struct {
         defer gpa.free(full_path);
 
         // This is blocking and will actually download the contents of the torrent
-        try torrent.download(gpa, full_path);
+        // try torrent.download(gpa, full_path);
     }
 
     /// calls the trackerURL to retrieve a list of peers and our interval
     /// of when we can obtain a new list of peers.
     fn getPeers(self: TorrentFile, gpa: *Allocator, peer_id: [20]u8, port: u16) ![]const Peer {
-        const url = try self.trackerURL(self.gpa, peer_id, port);
+        const url = try self.trackerURL(gpa, peer_id, port);
 
+        std.debug.print("Url: {s}\n", .{url});
         const resp = try http.get(gpa, url);
 
+        std.debug.print("Resp: {s}\n", .{resp.status_code});
+        for (resp.headers) |header| {
+            std.debug.print("{s}: {s}\n", .{ header.name, header.value });
+        }
+        std.debug.print("body: {s}\n", .{resp.body});
         if (!std.mem.eql(u8, resp.status_code, "200")) return error.CouldNotConnect;
 
         var arena = std.heap.ArenaAllocator.init(gpa);
@@ -183,16 +200,24 @@ pub const TorrentFile = struct {
         var deserializer = bencode.deserializer(&arena.allocator, file.reader());
         const meta = try deserializer.deserialize(TorrentMeta);
 
-        const hash = try self.info.hash(&arena.allocator);
-        const piece_hashes = try self.info.pieceHashes(&arena.allocator);
+        const hash = try meta.info.hash(&arena.allocator);
+        const piece_hashes = try meta.info.pieceHashes(&arena.allocator);
+
+        const size = meta.info.length orelse blk: {
+            var i: usize = 0;
+            for (meta.info.files.?) |part| {
+                i += part.length;
+            }
+            break :blk i;
+        };
 
         return TorrentFile{
             .announce = meta.announce,
             .hash = hash,
             .piece_hashes = piece_hashes,
-            .piece_length = info.piece_length,
-            .size = info.length,
-            .name = info.name,
+            .piece_length = meta.info.piece_length,
+            .size = size,
+            .name = meta.info.name,
             .state = arena.state,
         };
     }
@@ -208,7 +233,7 @@ fn generatePeerId() ![20]u8 {
 
     // generate a random seed
     var buf: [8]u8 = undefined;
-    try std.crypto.randomBytes(&buf);
+    std.crypto.random.bytes(&buf);
     const seed = std.mem.readIntLittle(u64, &buf);
 
     const lookup = "0123456789abcdefghijklmnopqrstuvwxyz";
@@ -226,53 +251,45 @@ fn generatePeerId() ![20]u8 {
 /// encodes queries into a query string attached to the provided base
 /// i.e. results example.com?parm=val where `base` is example.com
 /// and `queries` is a HashMap with key "parm" and value "val".
-fn encodeUrl(allocator: *Allocator, base: []const u8, queries: []const QueryParameter) ![]const u8 {
+fn encodeUrl(gpa: *Allocator, base: []const u8, queries: []const QueryParameter) ![]const u8 {
     if (queries.len == 0) return base;
 
-    // Predetermine the size needed for our buffer
-    const size = blk: {
-        var sum: usize = base.len;
-        for (queries) |query| {
-            sum += query.name.len + query.value.len + 2; // 2 for symbols & and =
+    var list = std.ArrayList(u8).init(gpa);
+    defer list.deinit();
+
+    const writer = list.writer();
+    try writer.writeAll(base);
+    try writer.writeByte('?');
+    for (queries) |query, i| {
+        if (i != 0) {
+            try writer.writeByte('&');
         }
-        break :blk sum;
-    };
-
-    // Allocate a buffer of our predetermined size
-    const buf = try allocator.alloc(u8, size);
-    errdefer allocator.free(buf);
-
-    // fill the buffer with our base and ? symbol
-    std.mem.copy(u8, buf, base);
-    std.mem.copy(u8, buf[base.len..], "?");
-
-    // fill the rest of the buffer with our query string
-    var index: usize = base.len + 1;
-    for (queries) |query| {
-        // skip first '&' symbol
-        if (index > base.len + 1) {
-            std.mem.copy(u8, buf[index..], "&");
-            index += 1;
-        }
-        std.mem.copy(u8, buf[index..], query.name);
-        index += query.name.len;
-        std.mem.copy(u8, buf[index..], "=");
-        index += 1;
-        std.mem.copy(u8, buf[index..], query.value);
-        index += query.value.len;
+        try writer.writeAll(query.name);
+        try writer.writeByte('=');
+        try escapeSlice(writer, query.value);
     }
 
-    return buf;
+    return list.toOwnedSlice();
 }
 
-/// Will create a string from the given integer.
-/// i.e. creates "1234" from 1234.
-fn intToSlice(allocator: *Allocator, val: usize) ![]const u8 {
-    const buffer = try allocator.alloc(u8, 100);
-    return buffer[0..std.fmt.formatIntBuf(buffer, val, 10, false, std.fmt.FormatOptions{})];
+fn escapeSlice(writer: anytype, slice: []const u8) !void {
+    for (slice) |c| try escapeChar(writer, c);
 }
 
-pub fn unMarshal(data: []u8) !Torrent {}
+/// Encodes a singular character
+fn escapeChar(writer: anytype, char: u8) !void {
+    switch (char) {
+        '0'...'9',
+        'a'...'z',
+        'A'...'Z',
+        '.',
+        '-',
+        '_',
+        '~',
+        => try writer.writeByte(char),
+        else => try writer.print("%{X}", .{char}),
+    }
+}
 
 test "encode URL queries" {
     const queries = [_]QueryParameter{
@@ -281,10 +298,10 @@ test "encode URL queries" {
     };
     const base = "test.com";
 
-    const result = try encodeUrl(testing.allocator, base, queries[0..]);
+    const result = try encodeUrl(testing.allocator, base, &queries);
     defer testing.allocator.free(result);
 
-    std.debug.assert(std.mem.eql(u8, "test.com?key1=val1&key2=val2", result));
+    testing.expectEqualStrings("test.com?key1=val1&key2=val2", result);
 }
 
 test "generating tracker URL" {
@@ -299,18 +316,29 @@ test "generating tracker URL" {
         .piece_hashes = &piece_hashes,
         .piece_length = 1,
         .name = "test",
-        .allocator = undefined,
-        .buffer = undefined,
+        .state = undefined,
     };
-    const url = try tf.trackerURL(testing.allocator, "1234", 80);
+    const url = try tf.trackerURL(
+        testing.allocator,
+        "12345678901234567890".*,
+        80,
+    );
     defer testing.allocator.free(url);
-    std.debug.assert(std.mem.eql(u8, "example.com?info_hash=12345678901234567890&peer_id=1234&port=80&uploaded=0&downloaded=0&compact=1&left=120", url));
+    testing.expectEqualStrings(
+        "example.com?info_hash=12345678901234567890&peer_id=12345678901234567890&port=80&uploaded=0&downloaded=0&compact=1&left=120",
+        url,
+    );
 }
 
-test "read torrent file" {
-    var path = "debian-10.4.0-arm64-netinst.iso.torrent";
-    const torrent_file = try TorrentFile.open(testing.allocator, path);
-    defer torrent_file.deinit();
-    std.debug.warn("\nTorrent name: {}", .{torrent_file.hash});
-    std.debug.warn("\nTorrent name: {}", .{torrent_file.hash});
+test "Escape url" {
+    const test_string = "https://www.google.com/search?q=tracker+info_hash+escape&oq=tracker+" ++
+        "info_hash+escape&aqs=chrome..69i57j33i160l2.3049j0j7&sourceid=chrome&ie=UTF-8";
+    const expected = "https%3A%2F%2Fwww.google.com%2Fsearch%3Fq%3Dtracker%2Binfo_hash%2B" ++
+        "escape%26oq%3Dtracker%2Binfo_hash%2Bescape%26aqs%3Dchrome..69i57j33i160l2.3049j0j7%26sourceid%3Dchrome%26ie%3DUTF-8";
+
+    var list = std.ArrayList(u8).init(testing.allocator);
+    defer list.deinit();
+
+    try escapeSlice(list.writer(), test_string);
+    testing.expectEqualStrings(expected, list.items);
 }

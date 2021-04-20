@@ -17,8 +17,8 @@ pub fn unmarshal(gpa: *std.mem.Allocator, bytes: []const u8) ![]const Peer {
     var i: usize = 0;
     while (i < num_peers) : (i += 1) {
         const offset = i * 6;
-        const ip = toIPSlice(bytes[offset .. offset + 4]);
-        const port = std.mem.readIntSliceBig(u16, bytes[offset + 4 .. offset + 6]);
+        const ip = toIPSlice(bytes[offset .. offset + 4][0..4]);
+        const port = std.mem.readIntBig(u16, bytes[offset + 4 .. offset + 6][0..2]);
 
         // silent fail if we cannot parse an address
         // as we could potentially parse other addresses.
@@ -32,7 +32,7 @@ pub fn unmarshal(gpa: *std.mem.Allocator, bytes: []const u8) ![]const Peer {
 
 /// Creates an ip addres in the form of a.b.c.d
 /// from a given array
-fn toIPSlice(bytes: [4]u8) ![]const u8 {
+fn toIPSlice(bytes: *const [4]u8) []const u8 {
     var buffer: [12]u8 = undefined;
 
     var offset: usize = 0;

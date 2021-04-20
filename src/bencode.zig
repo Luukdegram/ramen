@@ -15,7 +15,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
         last_char: u8,
 
         pub const Error = ReaderType.Error || std.fmt.ParseIntError ||
-            error{ OutOfMemory, UnsupportedType, EndOfStream };
+            error{ OutOfMemory, UnsupportedType, EndOfStream, InvalidLength };
 
         const Pair = struct { key: []const u8, value: Value };
 
@@ -143,6 +143,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
         /// Deserializes a slice of bytes
         fn deserializeBytes(self: *Self) Error![]u8 {
             const len = try self.deserializeLength();
+            if (len == 0) return error.InvalidLength;
             const value = try self.gpa.alloc(u8, len);
             try self.reader.readNoEof(value);
             self.last_char = value[len - 1];
@@ -169,6 +170,7 @@ pub fn Deserializer(comptime ReaderType: type) type {
             defer list.deinit();
             errdefer for (list.items) |item| item.deinit(self.gpa);
 
+            try self.nextByte(); // skip 'l'
             while (self.last_char != 'e') : (try self.nextByte()) {
                 const value = try self.deserializeValue();
                 try list.append(value);
@@ -230,11 +232,11 @@ pub fn Serializer(comptime WriterType: anytype) type {
                 .Int => try self.serializeInt(value),
                 .Pointer => |ptr| switch (ptr.size) {
                     .Slice => try self.serializeList(value),
-                    .One => try self.serialize(ptr.child),
+                    .One => try self.serialize(value.*),
                     .C, .Many => unreachable, // unsupported
                 },
-                .Optional => |opt| try self.serialize(opt.child),
-                else => unreachable, // unsupported
+                .Optional => if (value) |val| try self.serialize(val),
+                else => unreachable, // unsupported types
             }
         }
 
@@ -242,8 +244,11 @@ pub fn Serializer(comptime WriterType: anytype) type {
         fn serializeStruct(self: Self, value: anytype) Error!void {
             try self.writer.writeByte('d');
             inline for (meta.fields(@TypeOf(value))) |field| {
-                try self.writer.print("{d}:{s}", .{ field.name.len, &encodeFieldName(field.name) });
-                try self.serialize(@field(value, field.name));
+                // make sure to not write null fields
+                if (@typeInfo(field.field_type) != .Optional or @field(value, field.name) != null) {
+                    try self.writer.print("{d}:{s}", .{ field.name.len, &encodeFieldName(field.name) });
+                    try self.serialize(@field(value, field.name));
+                }
             }
             try self.writer.writeByte('e');
         }
@@ -291,7 +296,7 @@ test "Deserialize Bencode to Zig struct" {
         "12:piece lengthi262144eee";
 
     const Info = struct {
-        length: usize,
+        length: ?usize,
         name: []const u8,
         piece_length: usize,
     };
