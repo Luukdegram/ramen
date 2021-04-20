@@ -2,13 +2,16 @@ const std = @import("std");
 const TorrentFile = @import("torrent_file.zig").TorrentFile;
 
 pub fn main() anyerror!void {
-    var path = "bin/debian-10.4.0-arm64-netinst.iso.torrent";
-    var torrent = try TorrentFile.open(std.heap.page_allocator, path);
-    defer torrent.deinit();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // defer _ = gpa.deinit();
+
+    var path = "bin/TrueNAS-12.0-U3.iso.torrent";
+    var torrent = try TorrentFile.open(&gpa.allocator, path);
+    defer torrent.deinit(&gpa.allocator);
 
     var save_path = "bin";
-    torrent.download(save_path) catch |err| {
-        std.debug.warn("Could not download torrent:\n", .{});
+    torrent.download(&gpa.allocator, save_path) catch |err| {
+        std.debug.print("Could not download torrent: {s}\n", .{err});
         return err;
     };
 }
