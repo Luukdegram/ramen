@@ -19,7 +19,7 @@ pub const Message = union(enum(u8)) {
     /// Only sent in the very first message. Sent to peer
     /// to tell which pieces have already been download.
     /// This is used to resume a download from a later point.
-    bitfield: []const u8,
+    bitfield: []u8,
     /// Tells the peer the index, begin and length of the data we are requesting.
     request: Data,
     /// Tells the peer the index, begin and piece which the client wants to receive.
@@ -69,9 +69,9 @@ pub const Message = union(enum(u8)) {
             .not_interested,
             => 0,
             .have => 4,
-            .bitfield => @panic("TODO: bitfield serializeLen"),
+            .bitfield => |payload| @intCast(u32, payload.len),
             .request, .cancel => 12,
-            .piece => |piece| 12 + piece.block.len,
+            .piece => |piece| 12 + @intCast(u32, piece.block.len),
         };
     }
 
@@ -91,7 +91,7 @@ pub const Message = union(enum(u8)) {
     /// Returns `DeserializeError.Unsupported` when it tries to deserialize a message type that is
     /// not supported by the library yet.
     /// Returns `null` when peer has sent keep-alive
-    pub fn deserialize(gpa: *Allocator, reader: anytype) (DeserializeError || @TypeOf(reader))!?Message {
+    pub fn deserialize(gpa: *Allocator, reader: anytype) (DeserializeError || @TypeOf(reader).Error)!?Message {
         const length = try reader.readIntBig(u32);
         if (length == 0) return null;
 
@@ -112,26 +112,26 @@ pub const Message = union(enum(u8)) {
     }
 
     /// Serializes the given `Message` and writes it to the given `writer`
-    pub fn serialize(self: Message, writer: anytype) @TypeOf(writer)!void {
+    pub fn serialize(self: Message, writer: anytype) @TypeOf(writer).Error!void {
         const len = self.serializeLen() + 1; // 1 for the message type
-        try writer.writeByte(len);
+        try writer.writeIntBig(u32, len);
         try writer.writeByte(self.toInt());
         switch (self) {
             .choke,
-            unchoke,
-            interested,
-            not_interested,
+            .unchoke,
+            .interested,
+            .not_interested,
             => {},
-            .have => |index| try writer.writeIntBig(index),
-            .bitfield => @panic("TODO: Serialize bitfield"),
+            .have => |index| try writer.writeIntBig(u32, index),
+            .bitfield => |payload| try writer.writeAll(payload),
             .request, .cancel => |data| {
-                try writer.writeIntBig(data.index);
-                try writer.writeIntBig(data.begin);
-                try writer.writeIntBig(data.length);
+                try writer.writeIntBig(u32, data.index);
+                try writer.writeIntBig(u32, data.begin);
+                try writer.writeIntBig(u32, data.length);
             },
             .piece => |piece| {
-                try writer.writeIntBig(piece.index);
-                try writer.writeIntBig(piece.begin);
+                try writer.writeIntBig(u32, piece.index);
+                try writer.writeIntBig(u32, piece.begin);
                 try writer.writeAll(piece.block);
             },
         }
@@ -145,7 +145,8 @@ pub const Message = union(enum(u8)) {
     /// Deserializes the given `reader` into a `Message.bitfield`
     /// As the length of the bitfield payload is variable, it requires an allocator
     fn deserializeBitfield(gpa: *Allocator, length: u32, reader: anytype) @TypeOf(reader).Error!Message {
-        @panic("TODO: Implement deserializeBitfield");
+        const bitfield = try gpa.alloc(u8, length);
+        return Message{ .bitfield = try reader.readAll(bitfield) };
     }
 
     /// Deserializes a fixed-length payload into a `Message.Request`
@@ -165,7 +166,7 @@ pub const Message = union(enum(u8)) {
     /// As the length of the payload is variable, it accepts a length and `Allocator`.
     /// Note that it blocks on reading the payload until all is read.
     fn deserializePiece(gpa: *Allocator, length: u32, reader: anytype) (DeserializeError || @TypeOf(reader).Error)!Message {
-        const block = try gpa.alloc(length);
+        const block = try gpa.alloc(u8, length);
         return Message{
             .piece = .{
                 .index = try reader.readIntBig(u32),
