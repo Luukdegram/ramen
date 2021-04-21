@@ -37,12 +37,8 @@ const Info = struct {
         var list = std.ArrayList(u8).init(gpa);
         defer list.deinit();
 
-        var serializer = bencode.serializer(list.writer());
+        const serializer = bencode.serializer(list.writer());
         try serializer.serialize(self);
-
-        var stream = std.io.fixedBufferStream(list.items);
-        var des = bencode.deserializer(gpa, stream.reader());
-        const info = try des.deserialize(Info);
 
         // create sha1 hash of bencoded info
         var result: [20]u8 = undefined;
@@ -156,7 +152,7 @@ pub const TorrentFile = struct {
         defer gpa.free(full_path);
 
         // This is blocking and will actually download the contents of the torrent
-        // try torrent.download(gpa, full_path);
+        try torrent.download(gpa, full_path);
     }
 
     /// calls the trackerURL to retrieve a list of peers and our interval

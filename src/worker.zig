@@ -3,7 +3,7 @@ const Sha1 = std.crypto.hash.Sha1;
 const Allocator = std.mem.Allocator;
 const Peer = @import("Peer.zig");
 const Torrent = @import("torrent.zig").Torrent;
-const Client = @import("net/tcp_client.zig").TcpClient;
+const Client = @import("net/Tcp_client.zig");
 
 const max_items = 5;
 const max_block_size = 16384;
@@ -21,7 +21,7 @@ fn compare(a: Work, b: Work) bool {
 pub const Worker = struct {
     const Self = @This();
     /// mutex used to lock and unlock this `Worker` for multi-threading support
-    mutex: *std.Mutex,
+    mutex: *std.Thread.Mutex,
     /// Priority based queue that contains our pieces that need to be downloaded
     /// we probably want to replace this with a regular queue as the priority does not matter
     work: *std.ArrayList(Work),
@@ -39,7 +39,7 @@ pub const Worker = struct {
     /// Creates a new worker for the given work
     pub fn init(
         gpa: *Allocator,
-        mutex: *std.Mutex,
+        mutex: *std.Thread.Mutex,
         torrent: *const Torrent,
         work: *std.ArrayList(Work),
         file: std.fs.File,
@@ -61,7 +61,7 @@ pub const Worker = struct {
         defer lock.release();
 
         const peer = if (self.workers > 0) self.torrent.peers[self.workers - 1] else return null;
-        var client = Client.init(self.gpa, peer, self.torrent.file.hash, self.torrent.peer_id);
+        var client = Client.init(peer, self.torrent.file.hash, self.torrent.peer_id);
         self.workers -= 1;
 
         return client;
@@ -89,9 +89,9 @@ pub const Worker = struct {
         const size = try self.file.pwrite(work.buffer, work.index * work.size);
         self.downloaded += size;
         const completed = self.downloaded / self.torrent.file.size * 100;
-        std.debug.warn("\r{Bi:.2} \t\t{Bi:.2}", .{
-            self.downloaded,
-            self.torrent.file.size,
+        std.debug.print("\r{:.2} \t\t{:.2}", .{
+            std.fmt.fmtIntSizeBin(self.downloaded),
+            std.fmt.fmtIntSizeBin(self.torrent.file.size),
         });
     }
 };
@@ -99,25 +99,20 @@ pub const Worker = struct {
 /// A piece of work that needs to be downloaded
 pub const Work = struct {
     const Self = @This();
-    index: usize,
+    index: u32,
     hash: [20]u8,
-    size: usize,
+    size: u32,
     gpa: *Allocator,
-    buffer: []u8,
+    buffer: []const u8,
 
     /// Initializes work and creates a buffer according to the given size,
     /// call deinit() to free its memory.
-    pub fn init(
-        index: usize,
-        hash: [20]u8,
-        size: usize,
-        allocator: *Allocator,
-    ) Self {
+    pub fn init(index: u32, hash: [20]u8, size: u32, gpa: *Allocator) Self {
         return Self{
             .index = index,
             .hash = hash,
             .size = size,
-            .allocator = allocator,
+            .gpa = gpa,
             .buffer = undefined,
         };
     }
@@ -126,7 +121,7 @@ pub const Work = struct {
     /// then downloads the smaller pieces and puts them inside the buffer
     pub fn download(self: *Self, client: *Client) !void {
         var downloaded: usize = 0;
-        var requested: usize = 0;
+        var requested: u32 = 0;
         var backlog: usize = 0;
         // incase of an error, the thread function will take care of the memory
         self.buffer = try self.gpa.alloc(u8, self.size);
@@ -136,41 +131,40 @@ pub const Work = struct {
             // if we are not choked, request for bytes
             if (!client.choked) {
                 while (backlog < max_items and requested < self.size) : (backlog += 1) {
-                    const block_size = if (self.size - requested < max_block_size) self.size - requested else max_block_size;
+                    const block_size: u32 = if (self.size - requested < max_block_size) self.size - requested else max_block_size;
                     try client.sendRequest(self.index, requested, block_size);
                     requested += block_size;
                 }
             }
 
             // read the message we received, this is blocking
-            if (try client.read()) |message| {
-                defer self.gpa.free(message.payload);
-                switch (message.message_type) {
-                    .Choke => client.choked = true,
-                    .Unchoke => client.choked = false,
-                    .Have => {
-                        const index = try message.parseHave();
-                        if (client.bitfield) |*bitfield| {
-                            bitfield.setPiece(index);
-                        }
-                    },
-                    .Piece => {
-                        const size = try message.parsePiece(self.buffer, self.index);
-                        downloaded += size;
-                        backlog -= 1;
-                    },
-                    else => {
-                        std.debug.warn("Unsupported message type: {}\n", .{message.message_type});
-                        return error.IncorrectMessageType;
-                    },
-                }
-            }
+            // if (try client.read()) |message| {
+            //     defer self.gpa.free(message.payload);
+            //     switch (message.message_type) {
+            //         .Choke => client.choked = true,
+            //         .Unchoke => client.choked = false,
+            //         .Have => {
+            //             const index = try message.parseHave();
+            //             if (client.bitfield) |*bitfield| {
+            //                 bitfield.setPiece(index);
+            //             }
+            //         },
+            //         .Piece => {
+            //             const size = try message.parsePiece(self.buffer, self.index);
+            //             downloaded += size;
+            //             backlog -= 1;
+            //         },
+            //         else => {
+            //             std.debug.print("Unsupported message type: {}\n", .{message.message_type});
+            //             return error.IncorrectMessageType;
+            //         },
+            //     }
+            // }
         }
     }
 
     /// Frees the Work's memory
     pub fn deinit(self: *Self) void {
-        //TODO self.buffer can be undefined
         self.gpa.free(self.buffer);
         self.* = undefined;
     }
@@ -178,7 +172,7 @@ pub const Work = struct {
     /// Checks the integrity of the data by checking its hash against the work's hash.
     pub fn eqlHash(self: Self) bool {
         var out: [20]u8 = undefined;
-        Sha1.hash(self.buffer, &out);
+        Sha1.hash(self.buffer, &out, .{});
         return std.mem.eql(u8, &self.hash, &out);
     }
 };
