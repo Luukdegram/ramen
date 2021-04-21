@@ -44,13 +44,9 @@ const Info = struct {
         var des = bencode.deserializer(gpa, stream.reader());
         const info = try des.deserialize(Info);
 
-        std.debug.print("Names: {s} - {s}\n", .{ self.name, info.name });
-        std.debug.print("Pieces length: {d} - {d}\n", .{ self.pieces.len, info.pieces.len });
-
         // create sha1 hash of bencoded info
         var result: [20]u8 = undefined;
         Sha1.hash(list.items, &result, .{});
-        std.debug.print("Hash: {s}\n", .{result});
         return result;
     }
 
@@ -81,10 +77,11 @@ const TorrentMeta = struct {
 
 /// Bencode file with tracker information
 const Tracker = struct {
+    failure_reason: ?[]const u8 = null,
     /// Defines how often trackers are refreshed by the host
-    interval: usize,
+    interval: ?usize = null,
     /// Slice of all peers that are seeding
-    peers: []const u8,
+    peers: ?[]const u8 = null,
 };
 
 /// struct to hold URL query information
@@ -127,6 +124,7 @@ pub const TorrentFile = struct {
             .{ .name = "downloaded", .value = "0" },
             .{ .name = "compact", .value = "1" },
             .{ .name = "left", .value = size },
+            .{ .name = "key", .value = "test1241" },
         };
 
         return try encodeUrl(gpa, self.announce, &queries);
@@ -142,6 +140,7 @@ pub const TorrentFile = struct {
         // build our peers to connect to
         const peer_id = try generatePeerId();
         const peers = try self.getPeers(gpa, peer_id, local_port);
+        defer gpa.free(peers);
 
         const torrent = Torrent{
             .peers = peers,
@@ -163,27 +162,29 @@ pub const TorrentFile = struct {
     /// calls the trackerURL to retrieve a list of peers and our interval
     /// of when we can obtain a new list of peers.
     fn getPeers(self: TorrentFile, gpa: *Allocator, peer_id: [20]u8, port: u16) ![]const Peer {
-        const url = try self.trackerURL(gpa, peer_id, port);
-
-        std.debug.print("Url: {s}\n", .{url});
-        const resp = try http.get(gpa, url);
-
-        std.debug.print("Resp: {s}\n", .{resp.status_code});
-        for (resp.headers) |header| {
-            std.debug.print("{s}: {s}\n", .{ header.name, header.value });
-        }
-        std.debug.print("body: {s}\n", .{resp.body});
-        if (!std.mem.eql(u8, resp.status_code, "200")) return error.CouldNotConnect;
-
+        // apart from the slice of Peers we only allocate temporary data
+        // therefore it's easier (and faster) to just use an arena here
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
+        const ally = &arena.allocator;
+
+        const url = try self.trackerURL(ally, peer_id, port);
+
+        const resp = try http.get(ally, url);
+
+        if (!std.mem.eql(u8, resp.status_code, "200")) return error.CouldNotConnect;
 
         var stream = std.io.fixedBufferStream(resp.body);
-        var deserializer = bencode.deserializer(&arena.allocator, stream.reader());
+        var deserializer = bencode.deserializer(ally, stream.reader());
         const tracker = try deserializer.deserialize(Tracker);
 
-        // the peers are in binary format, so unmarshal those too.
-        return Peer.unmarshal(gpa, tracker.peers);
+        if (tracker.failure_reason) |reason| {
+            std.log.err("Could not connect with tracker: '{s}'", .{reason});
+            return error.CouldNotConnect;
+        }
+
+        // the peers are compacted into binary format, so decode those too.
+        return Peer.listFromCompact(gpa, tracker.peers.?);
     }
 
     /// Opens a torrentfile from the given path
@@ -267,6 +268,7 @@ fn encodeUrl(gpa: *Allocator, base: []const u8, queries: []const QueryParameter)
         try writer.writeAll(query.name);
         try writer.writeByte('=');
         try escapeSlice(writer, query.value);
+        // try writer.writeAll(query.value);
     }
 
     return list.toOwnedSlice();
@@ -287,7 +289,7 @@ fn escapeChar(writer: anytype, char: u8) !void {
         '_',
         '~',
         => try writer.writeByte(char),
-        else => try writer.print("%{X}", .{char}),
+        else => try writer.print("%{X:0>2}", .{char}),
     }
 }
 
