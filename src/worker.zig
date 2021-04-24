@@ -2,7 +2,7 @@ const std = @import("std");
 const Sha1 = std.crypto.hash.Sha1;
 const Allocator = std.mem.Allocator;
 const Peer = @import("Peer.zig");
-const Torrent = @import("torrent.zig").Torrent;
+const Torrent = @import("Torrent.zig");
 const Client = @import("net/Tcp_client.zig");
 const Message = @import("net/message.zig").Message;
 
@@ -87,10 +87,11 @@ pub const Worker = struct {
         defer lock.release();
         const size = try self.file.pwrite(work.buffer, work.index * work.size);
         self.downloaded += size;
-        const completed = self.downloaded / self.torrent.file.size * 100;
-        std.debug.print("\r{:.2} \t\t{:.2}", .{
+        const completed: f64 = @intToFloat(f64, self.downloaded) / @intToFloat(f64, self.torrent.file.size) * 100;
+        std.debug.print("\r{:.2} \t\t{:.2} \t\t {d:.2}", .{
             std.fmt.fmtIntSizeBin(self.downloaded),
             std.fmt.fmtIntSizeBin(self.torrent.file.size),
+            completed,
         });
     }
 };

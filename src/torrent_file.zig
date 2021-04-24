@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 const Sha1 = std.crypto.hash.Sha1;
 
 const bencode = @import("bencode.zig");
-const Torrent = @import("torrent.zig").Torrent;
+const Torrent = @import("Torrent.zig");
 
 /// Our port we will seed from when we implement seeding
 /// Default based on 'BEP 3': http://bittorrent.org/beps/bep_0003.html
