@@ -4,14 +4,12 @@ const Allocator = std.mem.Allocator;
 const Peer = @import("Peer.zig");
 const Torrent = @import("torrent.zig").Torrent;
 const Client = @import("net/Tcp_client.zig");
+const Message = @import("net/message.zig").Message;
 
+/// Max blocks we request at a time
 const max_items = 5;
+/// most clients/servers report this as max block size (2^14)
 const max_block_size = 16384;
-
-/// Context passed to the working threads
-pub const WorkerContext = struct {
-    worker: *Worker,
-};
 
 fn compare(a: Work, b: Work) bool {
     return true;
@@ -32,7 +30,7 @@ pub const Worker = struct {
     /// allocator used for the workers to allocate and free memory
     gpa: *Allocator,
     /// the total size that has been downloaded so far
-    downloaded: usize = 0,
+    downloaded: usize,
     /// The file we write to
     file: std.fs.File,
 
@@ -51,6 +49,7 @@ pub const Worker = struct {
             .workers = torrent.peers.len,
             .gpa = gpa,
             .file = file,
+            .downloaded = 0,
         };
     }
 
@@ -103,7 +102,7 @@ pub const Work = struct {
     hash: [20]u8,
     size: u32,
     gpa: *Allocator,
-    buffer: []const u8,
+    buffer: []u8,
 
     /// Initializes work and creates a buffer according to the given size,
     /// call deinit() to free its memory.
@@ -137,29 +136,24 @@ pub const Work = struct {
                 }
             }
 
-            // read the message we received, this is blocking
-            // if (try client.read()) |message| {
-            //     defer self.gpa.free(message.payload);
-            //     switch (message.message_type) {
-            //         .Choke => client.choked = true,
-            //         .Unchoke => client.choked = false,
-            //         .Have => {
-            //             const index = try message.parseHave();
-            //             if (client.bitfield) |*bitfield| {
-            //                 bitfield.setPiece(index);
-            //             }
-            //         },
-            //         .Piece => {
-            //             const size = try message.parsePiece(self.buffer, self.index);
-            //             downloaded += size;
-            //             backlog -= 1;
-            //         },
-            //         else => {
-            //             std.debug.print("Unsupported message type: {}\n", .{message.message_type});
-            //             return error.IncorrectMessageType;
-            //         },
-            //     }
-            // }
+            var message = Message.deserialize(self.gpa, client.socket.reader()) catch |err| switch (err) {
+                error.Unsupported => continue, // Unsupported protocol message type/extension
+                else => |e| return e,
+            } orelse continue; // peer sent keep-alive
+            defer message.deinit(self.gpa);
+
+            switch (message) {
+                .choke => client.choked = true,
+                .unchoke => client.choked = false,
+                .have => |index| if (client.bitfield) |*bit_field| bit_field.setPiece(index),
+                .piece => |piece| {
+                    downloaded += piece.block.len;
+                    backlog -= 1;
+                    std.mem.copy(u8, self.buffer[piece.begin..], piece.block);
+                },
+                .bitfield => |payload| client.bitfield = .{ .buffer = payload },
+                else => {},
+            }
         }
     }
 
