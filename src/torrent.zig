@@ -4,7 +4,6 @@ const Peer = @import("Peer.zig");
 const TorrentFile = @import("torrent_file.zig").TorrentFile;
 const Worker = @import("worker.zig").Worker;
 const Work = @import("worker.zig").Work;
-const WorkerContext = @import("worker.zig").WorkerContext;
 const Client = @import("net/Tcp_client.zig");
 
 pub const Torrent = struct {
@@ -16,20 +15,16 @@ pub const Torrent = struct {
     file: *TorrentFile,
 
     /// Downloads the torrent and writes to the given stream
-    pub fn download(
-        self: Torrent,
-        gpa: *std.mem.Allocator,
-        path: []const u8,
-    ) !void {
+    pub fn download(self: Torrent, gpa: *std.mem.Allocator, path: []const u8) !void {
         std.debug.print("Download started for torrent: {s}\n", .{self.file.name});
 
-        var queue = try std.ArrayList(Work).initCapacity(gpa, self.file.piece_hashes.len);
-        defer queue.deinit();
+        var work_pieces = try std.ArrayList(Work).initCapacity(gpa, self.file.piece_hashes.len);
+        defer work_pieces.deinit();
 
         // Creates jobs for all pieces that needs to be downloaded
         for (self.file.piece_hashes) |hash, i| {
             var index = @intCast(u32, i);
-            queue.appendAssumeCapacity(Work.init(index, hash, self.pieceSize(index), gpa));
+            work_pieces.appendAssumeCapacity(Work.init(index, hash, self.pieceSize(index), gpa));
         }
 
         var mutex = std.Thread.Mutex{};
@@ -39,10 +34,13 @@ pub const Torrent = struct {
         const file = try std.fs.cwd().createFile(path, .{ .lock = .Exclusive });
         defer file.close();
 
-        var worker = Worker.init(gpa, &mutex, &self, &queue, file);
+        var worker = Worker.init(gpa, &mutex, &self, &work_pieces, file);
 
         std.debug.print("Peer size: {d}\n", .{self.peers.len});
-        const threads = try gpa.alloc(*std.Thread, self.peers.len);
+        std.debug.print("Pieces to download: {d}\n", .{work_pieces.items.len});
+        const threads = try gpa.alloc(*std.Thread, try std.Thread.cpuCount());
+        // const threads = try gpa.alloc(*std.Thread, 1);
+        defer gpa.free(threads);
         for (threads) |*t| {
             t.* = try std.Thread.spawn(downloadWork, &worker);
         }
@@ -80,12 +78,10 @@ pub const Torrent = struct {
 /// Downloads all pieces of work distributed to multiple peers/threads
 fn downloadWork(worker: *Worker) !void {
     if (worker.getClient()) |*client| {
-        client.connect() catch |err| {
-            return;
-        };
+        client.connect() catch return;
         defer client.close(worker.gpa);
 
-        try client.send(.unchoke);
+        // try client.send(.unchoke);
         try client.send(.interested);
 
         // our work loop, try to download all pieces of work
@@ -108,7 +104,7 @@ fn downloadWork(worker: *Worker) !void {
                     // Unsupported peer, disconnect
                     // error.IncorrectMessageType => return,
                     // peer slams the door and disconnects
-                    error.ConnectionResetByPeer => return,
+                    error.ConnectionResetByPeer, error.EndOfStream => return,
                     // in other cases, skip this work piece and try again
                     else => continue,
                 }
