@@ -39,7 +39,7 @@ pub fn download(self: Torrent, gpa: *std.mem.Allocator, path: []const u8) !void 
 
     std.debug.print("Peer size: {d}\n", .{self.peers.len});
     std.debug.print("Pieces to download: {d}\n", .{work_pieces.items.len});
-    const threads = try gpa.alloc(*std.Thread, self.peers.len);
+    const threads = try gpa.alloc(*std.Thread, try std.Thread.cpuCount());
     defer gpa.free(threads);
     for (threads) |*t| {
         t.* = try std.Thread.spawn(downloadWork, &worker);
@@ -98,12 +98,9 @@ fn downloadWork(worker: *Worker) !void {
             // download the piece of work
             work.download(client) catch |err| {
                 try worker.put(work.*);
-                std.debug.print("Couldn't download piece: {s}\n", .{err});
                 switch (err) {
-                    // Unsupported peer, disconnect
-                    // error.IncorrectMessageType => return,
-                    // peer slams the door and disconnects
-                    error.ConnectionResetByPeer, error.EndOfStream => return,
+                    error.ConnectionResetByPeer, error.EndOfStream => return, // peer slams the door and disconnects
+                    error.OutOfMemory => return, // we ran out of memory, close this connection to free up some of it
                     // in other cases, skip this work piece and try again
                     else => continue,
                 }
