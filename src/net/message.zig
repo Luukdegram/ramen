@@ -97,7 +97,11 @@ pub const Message = union(enum(u8)) {
         if (length == 0) return null;
 
         const type_byte = try reader.readByte();
-        const message_type = meta.intToEnum(Tag, type_byte) catch return error.Unsupported;
+        const message_type = meta.intToEnum(Tag, type_byte) catch {
+            // we must still read the bytes to ensure it does not mess up new messages
+            try reader.skipBytes(length - 1, .{});
+            return error.Unsupported;
+        };
 
         return switch (message_type) {
             .choke => Message.choke,

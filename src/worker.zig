@@ -98,7 +98,6 @@ pub const Worker = struct {
 
 /// A piece of work that needs to be downloaded
 pub const Work = struct {
-    const Self = @This();
     index: u32,
     hash: [20]u8,
     size: u32,
@@ -107,8 +106,8 @@ pub const Work = struct {
 
     /// Initializes work and creates a buffer according to the given size,
     /// call deinit() to free its memory.
-    pub fn init(index: u32, hash: [20]u8, size: u32, gpa: *Allocator) Self {
-        return Self{
+    pub fn init(index: u32, hash: [20]u8, size: u32, gpa: *Allocator) Work {
+        return .{
             .index = index,
             .hash = hash,
             .size = size,
@@ -119,7 +118,7 @@ pub const Work = struct {
 
     /// Creates a buffer with the size of the work piece,
     /// then downloads the smaller pieces and puts them inside the buffer
-    pub fn download(self: *Self, client: *Client) !void {
+    pub fn download(self: *Work, client: *Client) !void {
         var downloaded: usize = 0;
         var requested: u32 = 0;
         var backlog: usize = 0;
@@ -159,13 +158,13 @@ pub const Work = struct {
     }
 
     /// Frees the Work's memory
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *Work) void {
         self.gpa.free(self.buffer);
         self.* = undefined;
     }
 
     /// Checks the integrity of the data by checking its hash against the work's hash.
-    pub fn eqlHash(self: Self) bool {
+    pub fn eqlHash(self: Work) bool {
         var out: [20]u8 = undefined;
         Sha1.hash(self.buffer, &out, .{});
         return std.mem.eql(u8, &self.hash, &out);
