@@ -1,5 +1,6 @@
 const std = @import("std");
-const TorrentFile = @import("torrent_file.zig").TorrentFile;
+const ramen = @import("ramen.zig");
+const TorrentFile = ramen.TorrentFile;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

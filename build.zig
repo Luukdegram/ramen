@@ -14,6 +14,7 @@ pub fn build(b: *Builder) void {
     const exe = b.addExecutable("ramen", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
+    exe.addPackagePath("ramen", "src/lib.zig");
     exe.install();
 
     const run_cmd = exe.run();
@@ -24,4 +25,9 @@ pub fn build(b: *Builder) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    const main_tests = b.addTest("src/lib.zig");
+    main_tests.setBuildMode(mode);
+    const test_step = b.step("test", "Run library tests");
+    test_step.dependOn(&main_tests.step);
 }
