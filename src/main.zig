@@ -1,5 +1,5 @@
 const std = @import("std");
-const ramen = @import("ramen.zig");
+const ramen = @import("ramen");
 const TorrentFile = ramen.TorrentFile;
 
 pub fn main() !void {
