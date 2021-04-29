@@ -323,7 +323,7 @@ test "generating tracker URL" {
     );
     defer testing.allocator.free(url);
     testing.expectEqualStrings(
-        "example.com?info_hash=12345678901234567890&peer_id=12345678901234567890&port=80&uploaded=0&downloaded=0&compact=1&left=120",
+        "example.com?info_hash=12345678901234567890&peer_id=12345678901234567890&port=80&uploaded=0&downloaded=0&compact=1&left=120&key=test1241",
         url,
     );
 }
