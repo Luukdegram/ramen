@@ -131,8 +131,8 @@ pub const TorrentFile = struct {
         self.* = undefined;
     }
 
-    /// Downloads the actual content and saves it to the given path
-    pub fn download(self: *TorrentFile, gpa: *Allocator, path: []const u8) !void {
+    /// Downloads the actual content and saves it to the given directory if `path` is non-null
+    pub fn download(self: *TorrentFile, gpa: *Allocator, path: ?[]const u8) !void {
         // build our peers to connect to
         const peer_id = try generatePeerId();
         const peers = try self.getPeers(gpa, peer_id, local_port);
@@ -146,7 +146,7 @@ pub const TorrentFile = struct {
 
         // create destination file
         const full_path = try std.fs.path.join(gpa, &[_][]const u8{
-            path,
+            path orelse ".",
             self.name,
         });
         defer gpa.free(full_path);
